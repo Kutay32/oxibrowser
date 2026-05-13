@@ -55,11 +55,7 @@ pub fn base_url(url_str: &str) -> String {
                 return base_str.to_string();
             }
         }
-        format!(
-            "{}://{}",
-            parsed.scheme(),
-            parsed.host_str().unwrap_or("")
-        )
+        format!("{}://{}", parsed.scheme(), parsed.host_str().unwrap_or(""))
     } else {
         url_str.to_string()
     }

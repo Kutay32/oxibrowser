@@ -9,7 +9,6 @@ use winit::dpi::LogicalSize;
 use winit::event::WindowEvent;
 use winit::event_loop::{ActiveEventLoop, EventLoop};
 use winit::window::{Window, WindowAttributes};
-use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
 
 /// Browser UI yöneticisi
 pub struct BrowserUI {
@@ -69,14 +68,12 @@ impl ApplicationHandler for BrowserApp {
         let window = Arc::new(window);
 
         // Context oluştur (window'un display handle'ını kullan)
-        let context = unsafe {
-            softbuffer::Context::new(window.clone()).ok()
-        };
+        let context = softbuffer::Context::new(window.clone()).ok();
         self.context = context;
 
         // Surface oluştur
         if let Some(ref context) = self.context {
-            let surface = unsafe { Surface::new(context, window.clone()).ok() };
+            let surface = Surface::new(context, window.clone()).ok();
             self.surface = surface;
         }
 
@@ -144,17 +141,13 @@ impl BrowserApp {
             None => return,
         };
 
-        let window = match &self.window {
-            Some(w) => w,
-            None => return,
-        };
-
         let width = pixmap.width();
         let height = pixmap.height();
 
         // Browser'dan render et
         {
-            let browser = self.ui.lock().unwrap();
+            let mut browser = self.ui.lock().unwrap();
+            browser.relayout(width as f32, height as f32);
 
             if let Some(layout_root) = &browser.layout_result {
                 let mut commands = Vec::new();
@@ -175,7 +168,8 @@ impl BrowserApp {
                     let b = (245.0 * (1.0 - t) + 34.0 * t) as u8;
                     let mut paint = tiny_skia::Paint::default();
                     paint.set_color_rgba8(r, g, b, 255);
-                    if let Some(rect) = tiny_skia::Rect::from_xywh(0.0, y as f32, width as f32, 1.0) {
+                    if let Some(rect) = tiny_skia::Rect::from_xywh(0.0, y as f32, width as f32, 1.0)
+                    {
                         pm.fill_rect(rect, &paint, tiny_skia::Transform::identity(), None);
                     }
                 }
@@ -205,13 +199,15 @@ impl BrowserApp {
         // softbuffer: draw to screen
         if let Some(ref mut surface) = self.surface {
             if let Ok(mut buffer) = surface.buffer_mut() {
-                let buf_w = window.inner_size().width as usize;
-                let buf_h = window.inner_size().height as usize;
+                let buf_w = buffer.width().get() as usize;
+                let buf_h = buffer.height().get() as usize;
                 for y in 0..buf_h.min(height as usize) {
                     for x in 0..buf_w.min(width as usize) {
                         if let Some(p) = pixmap.pixel(x as u32, y as u32) {
                             let idx = y * buf_w + x;
-                            buffer[idx] = u32::from_be_bytes([p.blue(), p.green(), p.red(), p.alpha()]);
+                            buffer[idx] = (p.blue() as u32)
+                                | ((p.green() as u32) << 8)
+                                | ((p.red() as u32) << 16);
                         }
                     }
                 }

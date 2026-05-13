@@ -46,18 +46,12 @@ impl BoxDimensions {
 
     /// Padding + border genişliği
     pub fn padding_border_width(&self) -> f32 {
-        self.padding.left
-            + self.padding.right
-            + self.border.left
-            + self.border.right
+        self.padding.left + self.padding.right + self.border.left + self.border.right
     }
 
     /// Padding + border yüksekliği
     pub fn padding_border_height(&self) -> f32 {
-        self.padding.top
-            + self.padding.bottom
-            + self.border.top
-            + self.border.bottom
+        self.padding.top + self.padding.bottom + self.border.top + self.border.bottom
     }
 
     /// Toplam genişlik (margin + border + padding + content)
@@ -223,7 +217,9 @@ impl LayoutBox {
                 }
                 BoxType::Block => {
                     if !current_inline_group.is_empty() {
-                        new_children.push(create_anonymous_block(current_inline_group.drain(..).collect()));
+                        new_children.push(create_anonymous_block(
+                            current_inline_group.drain(..).collect(),
+                        ));
                     }
                     new_children.push(child);
                 }
@@ -243,7 +239,10 @@ impl LayoutBox {
 
 fn create_anonymous_block(children: Vec<LayoutBox>) -> LayoutBox {
     LayoutBox {
-        node_id: children.first().map(|c| c.node_id).unwrap_or(crate::dom::NodeId::zero()),
+        node_id: children
+            .first()
+            .map(|c| c.node_id)
+            .unwrap_or(crate::dom::NodeId::zero()),
         box_type: BoxType::AnonymousBlock,
         style: ComputedStyle::default(),
         dimensions: BoxDimensions::new(),
@@ -296,9 +295,12 @@ fn layout_block(box_node: &mut LayoutBox, parent_width: f32, x: f32, y: f32) {
 
     // Content genişliğini hesapla
     let available_width = parent_width
-        - margin_left - margin_right
-        - padding_left - padding_right
-        - border_left - border_right;
+        - margin_left
+        - margin_right
+        - padding_left
+        - padding_right
+        - border_left
+        - border_right;
 
     let mut content_width = match style.width {
         CssValue::Auto | CssValue::None => available_width.max(0.0),
@@ -325,7 +327,7 @@ fn layout_block(box_node: &mut LayoutBox, parent_width: f32, x: f32, y: f32) {
         - border_right
         - if left_auto { 0.0 } else { margin_left }
         - if right_auto { 0.0 } else { margin_right })
-        .max(0.0);
+    .max(0.0);
 
     match (left_auto, right_auto) {
         (true, true) => {
@@ -337,9 +339,12 @@ fn layout_block(box_node: &mut LayoutBox, parent_width: f32, x: f32, y: f32) {
         (false, false) => {}
     }
 
-    box_node.dimensions.margin = EdgeSizes::new(margin_top, margin_right, margin_bottom, margin_left);
-    box_node.dimensions.padding = EdgeSizes::new(padding_top, padding_right, padding_bottom, padding_left);
-    box_node.dimensions.border = EdgeSizes::new(border_top, border_right, border_bottom, border_left);
+    box_node.dimensions.margin =
+        EdgeSizes::new(margin_top, margin_right, margin_bottom, margin_left);
+    box_node.dimensions.padding =
+        EdgeSizes::new(padding_top, padding_right, padding_bottom, padding_left);
+    box_node.dimensions.border =
+        EdgeSizes::new(border_top, border_right, border_bottom, border_left);
 
     box_node.dimensions.content.x = x + margin_left + border_left + padding_left;
     box_node.dimensions.content.y = y + margin_top + border_top + padding_top;
@@ -352,16 +357,31 @@ fn layout_block(box_node: &mut LayoutBox, parent_width: f32, x: f32, y: f32) {
         match child.box_type {
             BoxType::Block | BoxType::AnonymousBlock => {
                 // Child'ın layout'unu hesapla
-                layout_block(child, content_width, box_node.dimensions.content.x, current_y);
+                layout_block(
+                    child,
+                    content_width,
+                    box_node.dimensions.content.x,
+                    current_y,
+                );
 
                 current_y = child.dimensions.margin_box().bottom();
             }
             BoxType::Inline | BoxType::Text => {
                 // Inline layout
-                layout_inline(child, content_width, &mut current_y, box_node.dimensions.content.x);
+                layout_inline(
+                    child,
+                    content_width,
+                    &mut current_y,
+                    box_node.dimensions.content.x,
+                );
             }
             BoxType::Flex => {
-                layout_block(child, content_width, box_node.dimensions.content.x, current_y);
+                layout_block(
+                    child,
+                    content_width,
+                    box_node.dimensions.content.x,
+                    current_y,
+                );
                 current_y = child.dimensions.margin_box().bottom();
             }
         }
@@ -369,11 +389,12 @@ fn layout_block(box_node: &mut LayoutBox, parent_width: f32, x: f32, y: f32) {
 
     // Content yüksekliğini hesapla
     let height = resolve_css_value(&style.height, current_y - box_node.dimensions.content.y);
-    box_node.dimensions.content.height = if height > 0.0 && !matches!(style.height, CssValue::Auto | CssValue::None) {
-        height
-    } else {
-        (current_y - box_node.dimensions.content.y).max(0.0)
-    };
+    box_node.dimensions.content.height =
+        if height > 0.0 && !matches!(style.height, CssValue::Auto | CssValue::None) {
+            height
+        } else {
+            (current_y - box_node.dimensions.content.y).max(0.0)
+        };
 }
 
 /// Inline layout - metin satırları

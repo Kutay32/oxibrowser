@@ -1,12 +1,10 @@
 /// Browser - ana browser durumu ve işlemleri
 use crate::css;
-use crate::dom::{self, Node};
+use crate::dom::Node;
 use crate::html;
 use crate::layout::{self, LayoutBox};
 use crate::net;
-use crate::render;
 use crate::style;
-use crate::url_bar;
 use std::collections::HashMap;
 
 /// Sekme bilgisi
@@ -131,8 +129,7 @@ impl Browser {
     /// Blocking HTTP isteği
     fn blocking_fetch(url: &str) -> Result<net::HttpResponse, String> {
         // Tokio runtime ile blocking fetch
-        let rt = tokio::runtime::Runtime::new()
-            .map_err(|e| format!("Runtime: {}", e))?;
+        let rt = tokio::runtime::Runtime::new().map_err(|e| format!("Runtime: {}", e))?;
         rt.block_on(net::fetch_url(url))
     }
 
@@ -168,6 +165,13 @@ impl Browser {
             let tab = &mut self.tabs[self.active_tab];
             tab.title = self.page_title.clone();
             tab.url = base_url.to_string();
+        }
+    }
+
+    /// Mevcut layout'u yeni viewport boyutuna gore tekrar hesapla.
+    pub fn relayout(&mut self, viewport_width: f32, viewport_height: f32) {
+        if let Some(ref mut layout_root) = self.layout_result {
+            layout::layout_document(layout_root, viewport_width, viewport_height);
         }
     }
 

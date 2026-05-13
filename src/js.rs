@@ -22,11 +22,7 @@ impl JsRuntime {
     }
 
     /// JavaScript kodunu çalıştır
-    pub fn evaluate(
-        &mut self,
-        code: &str,
-        _dom_context: Option<&Node>,
-    ) -> Result<String, String> {
+    pub fn evaluate(&mut self, code: &str, _dom_context: Option<&Node>) -> Result<String, String> {
         if !self.ready {
             self.init()?;
         }

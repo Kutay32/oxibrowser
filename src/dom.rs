@@ -229,10 +229,7 @@ pub fn print_dom(node: &Node, indent: usize) {
             }
         }
         NodeType::Element(el) => {
-            let id_attr = el
-                .id()
-                .map(|id| format!("#{}", id))
-                .unwrap_or_default();
+            let id_attr = el.id().map(|id| format!("#{}", id)).unwrap_or_default();
             let class_attr = if el.attributes.contains_key("class") {
                 format!(".{}", el.attributes["class"].replace(' ', "."))
             } else {

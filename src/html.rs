@@ -101,22 +101,33 @@ impl<'a> SimpleHtmlParser<'a> {
     fn skip_comment(&mut self, parent: &mut Node) {
         if self.starts_with("<!--") {
             self.pos += 4;
-            let end = self.remaining().find("-->").unwrap_or(self.input.len() - self.pos);
+            let end = self
+                .remaining()
+                .find("-->")
+                .unwrap_or(self.input.len() - self.pos);
             let comment = &self.input[self.pos..self.pos + end];
             self.pos += end + 3;
-            parent.children.push(Node::new(NodeType::Comment(comment.to_string())));
+            parent
+                .children
+                .push(Node::new(NodeType::Comment(comment.to_string())));
         }
     }
 
     fn skip_doctype(&mut self) {
         if self.starts_with("<!") {
-            let end = self.remaining().find('>').unwrap_or(self.input.len() - self.pos);
+            let end = self
+                .remaining()
+                .find('>')
+                .unwrap_or(self.input.len() - self.pos);
             self.pos += end + 1;
         }
     }
 
     fn skip_tag(&mut self) {
-        let end = self.remaining().find('>').unwrap_or(self.input.len() - self.pos);
+        let end = self
+            .remaining()
+            .find('>')
+            .unwrap_or(self.input.len() - self.pos);
         self.pos += end + 1;
     }
 
@@ -153,8 +164,8 @@ impl<'a> SimpleHtmlParser<'a> {
         let mut node = Node::new(NodeType::Element(element));
 
         let void_elements = [
-            "br", "hr", "img", "input", "meta", "link", "area", "base",
-            "col", "embed", "source", "track", "wbr",
+            "br", "hr", "img", "input", "meta", "link", "area", "base", "col", "embed", "source",
+            "track", "wbr",
         ];
 
         if self_closing || void_elements.contains(&tag_name.as_str()) {
@@ -167,7 +178,10 @@ impl<'a> SimpleHtmlParser<'a> {
                 break;
             }
             if self.starts_with(&closing_tag) {
-                let end = self.remaining().find('>').unwrap_or(self.input.len() - self.pos);
+                let end = self
+                    .remaining()
+                    .find('>')
+                    .unwrap_or(self.input.len() - self.pos);
                 self.pos += end + 1;
                 break;
             }
@@ -219,14 +233,20 @@ impl<'a> SimpleHtmlParser<'a> {
         let value = match self.peek() {
             Some('"') => {
                 self.pos += 1;
-                let end = self.remaining().find('"').unwrap_or(self.input.len() - self.pos);
+                let end = self
+                    .remaining()
+                    .find('"')
+                    .unwrap_or(self.input.len() - self.pos);
                 let v = self.input[self.pos..self.pos + end].to_string();
                 self.pos += end + 1;
                 v
             }
             Some('\'') => {
                 self.pos += 1;
-                let end = self.remaining().find('\'').unwrap_or(self.input.len() - self.pos);
+                let end = self
+                    .remaining()
+                    .find('\'')
+                    .unwrap_or(self.input.len() - self.pos);
                 let v = self.input[self.pos..self.pos + end].to_string();
                 self.pos += end + 1;
                 v

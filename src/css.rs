@@ -494,7 +494,7 @@ fn parse_selector_part(text: &str) -> Selector {
         let inner = text.trim_start_matches('[').trim_end_matches(']');
         if let Some(eq_pos) = inner.find('=') {
             let name = inner[..eq_pos].trim();
-            let op = if inner[..eq_pos].ends_with('~') {
+            let _op = if inner[..eq_pos].ends_with('~') {
                 "~="
             } else if inner[..eq_pos].ends_with('|') {
                 "|="
@@ -508,7 +508,10 @@ fn parse_selector_part(text: &str) -> Selector {
                 "="
             };
             let name = name.trim_end_matches(&['~', '|', '^', '$', '*']);
-            let value = inner[eq_pos + 1..].trim().trim_matches('"').trim_matches('\'');
+            let value = inner[eq_pos + 1..]
+                .trim()
+                .trim_matches('"')
+                .trim_matches('\'');
             Selector::AttributeEquals(name.to_string(), value.to_string())
         } else {
             Selector::AttributeExists(inner.trim().to_string())
@@ -549,7 +552,8 @@ pub fn parse_css_value(text: &str) -> CssDeclarationValue {
     if text.contains(char::is_whitespace) && !text.contains('(') {
         let parts: Vec<&str> = text.split_whitespace().collect();
         if parts.len() > 1 {
-            let values: Vec<CssDeclarationValue> = parts.iter().map(|p| parse_css_value(p)).collect();
+            let values: Vec<CssDeclarationValue> =
+                parts.iter().map(|p| parse_css_value(p)).collect();
             return CssDeclarationValue::Multiple(values);
         }
     }
@@ -584,7 +588,10 @@ fn parse_color(text: &str) -> Option<CssDeclarationValue> {
     // rgb(r, g, b)
     if text.starts_with("rgb(") && text.ends_with(')') {
         let inner = text.trim_start_matches("rgb(").trim_end_matches(')');
-        let parts: Vec<&str> = inner.split(&[',', ' '][..]).filter(|s| !s.is_empty()).collect();
+        let parts: Vec<&str> = inner
+            .split(&[',', ' '][..])
+            .filter(|s| !s.is_empty())
+            .collect();
         if parts.len() >= 3 {
             let r = parts[0].trim().parse::<u8>().unwrap_or(0);
             let g = parts[1].trim().parse::<u8>().unwrap_or(0);
@@ -601,7 +608,10 @@ fn parse_color(text: &str) -> Option<CssDeclarationValue> {
     // rgba(r, g, b, a)
     if text.starts_with("rgba(") && text.ends_with(')') {
         let inner = text.trim_start_matches("rgba(").trim_end_matches(')');
-        let parts: Vec<&str> = inner.split(&[',', ' '][..]).filter(|s| !s.is_empty()).collect();
+        let parts: Vec<&str> = inner
+            .split(&[',', ' '][..])
+            .filter(|s| !s.is_empty())
+            .collect();
         if parts.len() >= 4 {
             let r = parts[0].trim().parse::<u8>().unwrap_or(0);
             let g = parts[1].trim().parse::<u8>().unwrap_or(0);
@@ -663,7 +673,9 @@ fn parse_numeric_value(text: &str) -> Option<CssDeclarationValue> {
     }
 
     // Uzunluk birimleri
-    let units = ["px", "em", "rem", "pt", "cm", "mm", "in", "vw", "vh", "vmin", "vmax", "ch", "ex"];
+    let units = [
+        "px", "em", "rem", "pt", "cm", "mm", "in", "vw", "vh", "vmin", "vmax", "ch", "ex",
+    ];
     for unit in &units {
         if text.ends_with(unit) {
             let num_str = text[..text.len() - unit.len()].trim();
@@ -695,16 +707,14 @@ pub fn matches_selector(selector: &Selector, element: &crate::dom::ElementData) 
             // Basit - sadece descendant kısmını kontrol et
             matches_selector(descendant, element)
         }
-        Selector::Child { parent: _, child } => {
-            matches_selector(child, element)
-        }
-        Selector::AdjacentSibling { first: _, second } => {
-            matches_selector(second, element)
-        }
+        Selector::Child { parent: _, child } => matches_selector(child, element),
+        Selector::AdjacentSibling { first: _, second } => matches_selector(second, element),
         Selector::AttributeExists(name) => element.attributes.contains_key(name),
-        Selector::AttributeEquals(name, value) => {
-            element.attributes.get(name).map(|v| v == value).unwrap_or(false)
-        }
+        Selector::AttributeEquals(name, value) => element
+            .attributes
+            .get(name)
+            .map(|v| v == value)
+            .unwrap_or(false),
         Selector::PseudoClass(_) => {
             // Pseudo-class'ları basitçe true döndür (gerçek implementasyon daha karmaşık)
             true
@@ -717,9 +727,10 @@ pub fn selector_specificity(selector: &Selector) -> (u32, u32, u32) {
     match selector {
         Selector::Universal => (0, 0, 0),
         Selector::Tag(_) => (0, 0, 1),
-        Selector::Class(_) | Selector::PseudoClass(_) | Selector::AttributeExists(_) | Selector::AttributeEquals(_, _) => {
-            (0, 1, 0)
-        }
+        Selector::Class(_)
+        | Selector::PseudoClass(_)
+        | Selector::AttributeExists(_)
+        | Selector::AttributeEquals(_, _) => (0, 1, 0),
         Selector::Id(_) => (1, 0, 0),
         Selector::Compound(parts) => {
             let mut spec = (0, 0, 0);
@@ -731,9 +742,18 @@ pub fn selector_specificity(selector: &Selector) -> (u32, u32, u32) {
             }
             spec
         }
-        Selector::Descendant { ancestor, descendant }
-        | Selector::Child { parent: ancestor, child: descendant }
-        | Selector::AdjacentSibling { first: ancestor, second: descendant } => {
+        Selector::Descendant {
+            ancestor,
+            descendant,
+        }
+        | Selector::Child {
+            parent: ancestor,
+            child: descendant,
+        }
+        | Selector::AdjacentSibling {
+            first: ancestor,
+            second: descendant,
+        } => {
             let a = selector_specificity(ancestor);
             let d = selector_specificity(descendant);
             (a.0 + d.0, a.1 + d.1, a.2 + d.2)
