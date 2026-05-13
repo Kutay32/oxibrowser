@@ -1,0 +1,46 @@
+[package]
+name = "oxibrowser"
+version = "0.1.0"
+edition = "2021"
+description = "%100 Rust ile yazılmış web tarayıcısı - OxiBrowser"
+
+[dependencies]
+# Window & UI
+winit = "0.30"
+softbuffer = "0.4"
+
+# 2D Rendering
+tiny-skia = "0.11"
+
+# HTML/CSS - kendi parser'ımız, html5ever kullanmıyoruz
+# cssparser sadece CSS renk ayrıştırma için referans
+cssparser = "0.33"
+raw-window-handle = "0.6"
+
+# HTTP networking
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros"] }
+reqwest = { version = "0.12", default-features = false, features = [
+    "rustls-tls",
+] }
+url = "2.5"
+
+# JavaScript - devre dışı (boa_engine uyumluluk sorunu)
+# boa_engine = "0.18"
+
+# Text & Fonts
+ab_glyph = "0.2"
+fontdb = "0.16"
+
+# Image
+image = "0.25"
+
+# Text layout
+unicode-linebreak = "0.1"
+
+# Logging
+log = "0.4"
+env_logger = "0.11"
+
+[profile.release]
+opt-level = 2
+lto = true
