@@ -11,6 +11,7 @@ pub struct LayoutBox {
     pub box_type: BoxType,
     pub style: ComputedStyle,
     pub dimensions: BoxDimensions,
+    pub text: Option<String>,
     pub children: Vec<LayoutBox>,
 }
 
@@ -159,6 +160,7 @@ fn build_tree_recursive(
                 box_type,
                 style: style.clone(),
                 dimensions: BoxDimensions::new(),
+                text: None,
                 children: Vec::new(),
             };
 
@@ -176,8 +178,8 @@ fn build_tree_recursive(
             Some(layout_box)
         }
         NodeType::Text(text) => {
-            let trimmed = text.trim();
-            if trimmed.is_empty() {
+            let text = collapse_whitespace(text);
+            if text.is_empty() {
                 return None;
             }
 
@@ -191,6 +193,7 @@ fn build_tree_recursive(
                 box_type: BoxType::Text,
                 style,
                 dimensions: BoxDimensions::new(),
+                text: Some(text),
                 children: Vec::new(),
             })
         }
@@ -244,6 +247,7 @@ fn create_anonymous_block(children: Vec<LayoutBox>) -> LayoutBox {
         box_type: BoxType::AnonymousBlock,
         style: ComputedStyle::default(),
         dimensions: BoxDimensions::new(),
+        text: None,
         children,
     }
 }
@@ -252,30 +256,30 @@ fn create_anonymous_block(children: Vec<LayoutBox>) -> LayoutBox {
 pub fn calculate_layout(
     layout_root: &mut LayoutBox,
     containing_width: f32,
-    containing_height: f32,
+    _containing_height: f32,
 ) {
     match layout_root.box_type {
         BoxType::Block | BoxType::AnonymousBlock => {
-            layout_block(layout_root, containing_width);
+            layout_block(layout_root, containing_width, 0.0, 0.0);
         }
         BoxType::Inline | BoxType::Text => {
             // Inline layout, block layout içinde hesaplanır
         }
         BoxType::Flex => {
-            layout_block(layout_root, containing_width);
+            layout_block(layout_root, containing_width, 0.0, 0.0);
         }
     }
 }
 
 /// Block layout hesapla
-fn layout_block(box_node: &mut LayoutBox, parent_width: f32) {
+fn layout_block(box_node: &mut LayoutBox, parent_width: f32, x: f32, y: f32) {
     let style = &box_node.style;
 
     // Kenar değerlerini hesapla
-    let margin_top = resolve_css_value(&style.margin_top, parent_width);
-    let margin_right = resolve_css_value(&style.margin_right, parent_width);
-    let margin_bottom = resolve_css_value(&style.margin_bottom, parent_width);
-    let margin_left = resolve_css_value(&style.margin_left, parent_width);
+    let margin_top = resolve_edge_value(&style.margin_top, parent_width);
+    let mut margin_right = resolve_edge_value(&style.margin_right, parent_width);
+    let margin_bottom = resolve_edge_value(&style.margin_bottom, parent_width);
+    let mut margin_left = resolve_edge_value(&style.margin_left, parent_width);
 
     let padding_top = resolve_css_value(&style.padding_top, parent_width);
     let padding_right = resolve_css_value(&style.padding_right, parent_width);
@@ -287,61 +291,88 @@ fn layout_block(box_node: &mut LayoutBox, parent_width: f32) {
     let border_bottom = resolve_css_value(&style.border_bottom_width, parent_width);
     let border_left = resolve_css_value(&style.border_left_width, parent_width);
 
-    box_node.dimensions.margin = EdgeSizes::new(margin_top, margin_right, margin_bottom, margin_left);
-    box_node.dimensions.padding = EdgeSizes::new(padding_top, padding_right, padding_bottom, padding_left);
-    box_node.dimensions.border = EdgeSizes::new(border_top, border_right, border_bottom, border_left);
+    let left_auto = matches!(style.margin_left, CssValue::Auto);
+    let right_auto = matches!(style.margin_right, CssValue::Auto);
 
     // Content genişliğini hesapla
-    let width = resolve_css_value(&style.width, parent_width);
     let available_width = parent_width
         - margin_left - margin_right
         - padding_left - padding_right
         - border_left - border_right;
 
-    let content_width = if width == 0.0 || width.is_nan() {
-        available_width.max(0.0)
-    } else if width > 0.0 {
-        width
-    } else {
-        available_width.max(0.0)
+    let mut content_width = match style.width {
+        CssValue::Auto | CssValue::None => available_width.max(0.0),
+        _ => resolve_css_value(&style.width, parent_width).max(0.0),
     };
 
+    let min_width = resolve_css_value(&style.min_width, parent_width);
+    if min_width > 0.0 {
+        content_width = content_width.max(min_width);
+    }
+
+    if !matches!(style.max_width, CssValue::None | CssValue::Auto) {
+        let max_width = resolve_css_value(&style.max_width, parent_width);
+        if max_width > 0.0 {
+            content_width = content_width.min(max_width);
+        }
+    }
+
+    let remaining_width = (parent_width
+        - content_width
+        - padding_left
+        - padding_right
+        - border_left
+        - border_right
+        - if left_auto { 0.0 } else { margin_left }
+        - if right_auto { 0.0 } else { margin_right })
+        .max(0.0);
+
+    match (left_auto, right_auto) {
+        (true, true) => {
+            margin_left = remaining_width / 2.0;
+            margin_right = remaining_width / 2.0;
+        }
+        (true, false) => margin_left = remaining_width,
+        (false, true) => margin_right = remaining_width,
+        (false, false) => {}
+    }
+
+    box_node.dimensions.margin = EdgeSizes::new(margin_top, margin_right, margin_bottom, margin_left);
+    box_node.dimensions.padding = EdgeSizes::new(padding_top, padding_right, padding_bottom, padding_left);
+    box_node.dimensions.border = EdgeSizes::new(border_top, border_right, border_bottom, border_left);
+
+    box_node.dimensions.content.x = x + margin_left + border_left + padding_left;
+    box_node.dimensions.content.y = y + margin_top + border_top + padding_top;
     box_node.dimensions.content.width = content_width;
 
     // İçindeki block'ları yerleştir
-    let mut current_y = 0.0;
+    let mut current_y = box_node.dimensions.content.y;
 
     for child in &mut box_node.children {
         match child.box_type {
             BoxType::Block | BoxType::AnonymousBlock => {
                 // Child'ın layout'unu hesapla
-                layout_block(child, content_width);
+                layout_block(child, content_width, box_node.dimensions.content.x, current_y);
 
-                // Y pozisyonunu ayarla
-                child.dimensions.content.x = padding_left + border_left;
-                child.dimensions.content.y = current_y;
-
-                current_y += child.dimensions.total_height();
+                current_y = child.dimensions.margin_box().bottom();
             }
             BoxType::Inline | BoxType::Text => {
                 // Inline layout
-                layout_inline(child, content_width, &mut current_y, padding_left + border_left);
+                layout_inline(child, content_width, &mut current_y, box_node.dimensions.content.x);
             }
             BoxType::Flex => {
-                layout_block(child, content_width);
-                child.dimensions.content.x = padding_left + border_left;
-                child.dimensions.content.y = current_y;
-                current_y += child.dimensions.total_height();
+                layout_block(child, content_width, box_node.dimensions.content.x, current_y);
+                current_y = child.dimensions.margin_box().bottom();
             }
         }
     }
 
     // Content yüksekliğini hesapla
-    let height = resolve_css_value(&style.height, current_y);
-    box_node.dimensions.content.height = if height > 0.0 {
+    let height = resolve_css_value(&style.height, current_y - box_node.dimensions.content.y);
+    box_node.dimensions.content.height = if height > 0.0 && !matches!(style.height, CssValue::Auto | CssValue::None) {
         height
     } else {
-        current_y + padding_top + padding_bottom + border_top + border_bottom
+        (current_y - box_node.dimensions.content.y).max(0.0)
     };
 }
 
@@ -356,19 +387,19 @@ fn layout_inline(
         BoxType::Text => {
             // Metin kutusu - font metriklerine göre boyutlandır
             let font_size = resolve_css_value(&box_node.style.font_size, containing_width);
-            let line_height = resolve_css_value(&box_node.style.line_height, font_size);
-            let line_height = if line_height <= 0.0 {
-                font_size * 1.2
-            } else {
-                line_height
-            };
+            let line_height = resolve_line_height(&box_node.style.line_height, font_size);
+            let line_count = estimate_wrapped_line_count(
+                box_node.text.as_deref().unwrap_or(""),
+                containing_width,
+                font_size,
+            );
 
             box_node.dimensions.content.width = containing_width; // max genişlik
-            box_node.dimensions.content.height = line_height;
+            box_node.dimensions.content.height = line_height * line_count as f32;
             box_node.dimensions.content.x = x_offset;
             box_node.dimensions.content.y = *current_y;
 
-            *current_y += line_height;
+            *current_y += box_node.dimensions.content.height;
         }
         _ => {
             // Inline element
@@ -396,6 +427,62 @@ pub fn resolve_css_value(value: &CssValue, parent: f32) -> f32 {
         CssValue::Inherit => parent,
         CssValue::Zero => 0.0,
     }
+}
+
+pub fn resolve_line_height(value: &CssValue, font_size: f32) -> f32 {
+    match value {
+        CssValue::Pixels(v) => {
+            if *v > 0.0 {
+                *v
+            } else {
+                font_size * 1.2
+            }
+        }
+        CssValue::Percentage(p) => font_size * p / 100.0,
+        CssValue::Auto | CssValue::None | CssValue::Inherit | CssValue::Zero => font_size * 1.2,
+    }
+}
+
+fn resolve_edge_value(value: &CssValue, parent: f32) -> f32 {
+    match value {
+        CssValue::Auto | CssValue::None => 0.0,
+        _ => resolve_css_value(value, parent),
+    }
+}
+
+fn collapse_whitespace(text: &str) -> String {
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+fn estimate_wrapped_line_count(text: &str, max_width: f32, font_size: f32) -> usize {
+    if text.trim().is_empty() {
+        return 1;
+    }
+
+    let char_width = (font_size * 0.55).max(1.0);
+    let max_chars = (max_width / char_width).floor().max(1.0) as usize;
+    let mut lines = 1usize;
+    let mut current = 0usize;
+
+    for word in text.split_whitespace() {
+        let len = word.chars().count();
+        if current == 0 {
+            current = len;
+        } else if current + 1 + len > max_chars {
+            lines += 1;
+            current = len;
+        } else {
+            current += 1 + len;
+        }
+
+        if current > max_chars {
+            let extra = (current - 1) / max_chars;
+            lines += extra;
+            current %= max_chars;
+        }
+    }
+
+    lines.max(1)
 }
 
 /// Layout ağacını yazdır (debug)
