@@ -132,16 +132,7 @@ fn render_command(cmd: &DisplayCommand, pixmap: &mut tiny_skia::Pixmap) {
                 (color.a * 255.0) as u8,
             );
 
-            let r = tiny_skia::Rect::from_xywh(
-                rect.x.max(0.0),
-                rect.y.max(0.0),
-                rect.width.max(0.0),
-                rect.height.max(0.0),
-            );
-
-            if let Some(r) = r {
-                pixmap.fill_rect(r, &pb, tiny_skia::Transform::identity(), None);
-            }
+            fill_rect_safe(pixmap, rect.x, rect.y, rect.width, rect.height, &pb);
         }
         DisplayCommand::Text {
             text,
@@ -182,31 +173,37 @@ fn render_command(cmd: &DisplayCommand, pixmap: &mut tiny_skia::Pixmap) {
             let h = rect.height;
 
             if *top_width > 0.0 && top_color.a > 0.0 {
-                draw_line_rect(pixmap, x, y, x + w, y, *top_width, *top_color);
+                fill_colored_rect(pixmap, x, y, w, *top_width, *top_color);
             }
             if *right_width > 0.0 && right_color.a > 0.0 {
-                draw_line_rect(pixmap, x + w, y, x + w, y + h, *right_width, *right_color);
+                fill_colored_rect(
+                    pixmap,
+                    x + w - *right_width,
+                    y,
+                    *right_width,
+                    h,
+                    *right_color,
+                );
             }
             if *bottom_width > 0.0 && bottom_color.a > 0.0 {
-                draw_line_rect(pixmap, x, y + h, x + w, y + h, *bottom_width, *bottom_color);
+                fill_colored_rect(
+                    pixmap,
+                    x,
+                    y + h - *bottom_width,
+                    w,
+                    *bottom_width,
+                    *bottom_color,
+                );
             }
             if *left_width > 0.0 && left_color.a > 0.0 {
-                draw_line_rect(pixmap, x, y, x, y + h, *left_width, *left_color);
+                fill_colored_rect(pixmap, x, y, *left_width, h, *left_color);
             }
         }
         DisplayCommand::Image { rect } => {
             // Resim placeholder - mavi dikdörtgen
             let mut pb = tiny_skia::Paint::default();
             pb.set_color_rgba8(100, 150, 255, 200);
-            let r = tiny_skia::Rect::from_xywh(
-                rect.x,
-                rect.y,
-                rect.width.max(0.0),
-                rect.height.max(0.0),
-            );
-            if let Some(r) = r {
-                pixmap.fill_rect(r, &pb, tiny_skia::Transform::identity(), None);
-            }
+            fill_rect_safe(pixmap, rect.x, rect.y, rect.width, rect.height, &pb);
         }
     }
 }
@@ -265,6 +262,29 @@ fn draw_text(
     }
 }
 
+pub fn draw_ui_text(
+    pixmap: &mut tiny_skia::Pixmap,
+    text: &str,
+    x: f32,
+    y: f32,
+    max_width: f32,
+    font_size: f32,
+    color: Color,
+    text_align: TextAlign,
+) {
+    draw_text(
+        pixmap,
+        text,
+        x,
+        y,
+        max_width,
+        font_size,
+        font_size * 1.25,
+        color,
+        text_align,
+    );
+}
+
 fn draw_text_fallback(
     pixmap: &mut tiny_skia::Pixmap,
     text: &str,
@@ -288,9 +308,7 @@ fn draw_text_fallback(
     for (idx, line) in lines.iter().enumerate() {
         let width = (line.chars().count() as f32 * char_width).min(max_width);
         let line_y = y + idx as f32 * line_height + font_size * 0.75;
-        if let Some(rect) = tiny_skia::Rect::from_xywh(x, line_y, width, 2.0) {
-            pixmap.fill_rect(rect, &paint, tiny_skia::Transform::identity(), None);
-        }
+        fill_rect_safe(pixmap, x, line_y, width, 2.0, &paint);
     }
 }
 
@@ -426,13 +444,12 @@ fn blend_pixel(pixmap: &mut tiny_skia::Pixmap, x: i32, y: i32, color: Color, cov
     data[idx + 3] = 255;
 }
 
-fn draw_line_rect(
+fn fill_colored_rect(
     pixmap: &mut tiny_skia::Pixmap,
-    x1: f32,
-    y1: f32,
-    x2: f32,
-    y2: f32,
+    x: f32,
+    y: f32,
     width: f32,
+    height: f32,
     color: Color,
 ) {
     let mut pb = tiny_skia::Paint::default();
@@ -442,17 +459,44 @@ fn draw_line_rect(
         (color.b * 255.0) as u8,
         (color.a * 255.0) as u8,
     );
+    fill_rect_safe(pixmap, x, y, width, height, &pb);
+}
 
-    // Kalın çizgiyi ince bir dikdörtgen olarak çiz
-    let (rx, ry, rw, rh) = if x1 == x2 {
-        // Dikey çizgi
-        (x1 - width / 2.0, y1.min(y2), width, (y2 - y1).abs())
-    } else {
-        // Yatay çizgi
-        (x1.min(x2), y1 - width / 2.0, (x2 - x1).abs(), width)
-    };
+pub fn fill_solid_rect(
+    pixmap: &mut tiny_skia::Pixmap,
+    x: f32,
+    y: f32,
+    width: f32,
+    height: f32,
+    color: Color,
+) {
+    fill_colored_rect(pixmap, x, y, width, height, color);
+}
 
-    if let Some(r) = tiny_skia::Rect::from_xywh(rx, ry, rw, rh) {
-        pixmap.fill_rect(r, &pb, tiny_skia::Transform::identity(), None);
+fn fill_rect_safe(
+    pixmap: &mut tiny_skia::Pixmap,
+    x: f32,
+    y: f32,
+    width: f32,
+    height: f32,
+    paint: &tiny_skia::Paint,
+) {
+    if !x.is_finite() || !y.is_finite() || !width.is_finite() || !height.is_finite() {
+        return;
+    }
+
+    let x0 = x.max(0.0).floor();
+    let y0 = y.max(0.0).floor();
+    let x1 = (x + width).min(pixmap.width() as f32).ceil();
+    let y1 = (y + height).min(pixmap.height() as f32).ceil();
+    let width = x1 - x0;
+    let height = y1 - y0;
+
+    if width <= 0.0 || height <= 0.0 {
+        return;
+    }
+
+    if let Some(rect) = tiny_skia::Rect::from_xywh(x0, y0, width, height) {
+        pixmap.fill_rect(rect, paint, tiny_skia::Transform::identity(), None);
     }
 }

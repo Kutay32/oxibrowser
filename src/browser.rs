@@ -135,6 +135,8 @@ impl Browser {
 
     /// HTML'i parse et, stilleri uygula, layout ve render
     pub fn parse_and_render(&mut self, html_text: &str, base_url: &str) {
+        self.current_url = base_url.to_string();
+
         // HTML parse et
         self.dom_tree = Some(html::parse_html_simple(html_text));
 

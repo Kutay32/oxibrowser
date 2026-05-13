@@ -305,15 +305,21 @@ impl<'a> CssParser<'a> {
 
         // Değeri oku
         let mut value_text = String::new();
+        let mut depth = 0;
         loop {
-            self.skip_whitespace_and_comments();
-            if self.starts_with(";") {
+            if self.pos >= self.input.len() {
+                break;
+            }
+
+            let c = self.peek().unwrap();
+            if c == ';' && depth == 0 {
                 self.advance(); // skip ;
                 break;
             }
-            if self.starts_with("}") {
+            if c == '}' && depth == 0 {
                 break;
             }
+
             if self.starts_with("!important") || self.starts_with("! important") {
                 // !important işaretini geç
                 if self.starts_with("!important") {
@@ -324,12 +330,14 @@ impl<'a> CssParser<'a> {
                 // TODO: important flag'ini bildirime ekle
                 continue;
             }
-            if let Some(c) = self.peek() {
-                value_text.push(c);
-                self.advance();
-            } else {
-                break;
+
+            match c {
+                '(' | '[' => depth += 1,
+                ')' | ']' if depth > 0 => depth -= 1,
+                _ => {}
             }
+            value_text.push(c);
+            self.advance();
         }
 
         let property = property.trim().to_lowercase();
@@ -758,5 +766,27 @@ pub fn selector_specificity(selector: &Selector) -> (u32, u32, u32) {
             let d = selector_specificity(descendant);
             (a.0 + d.0, a.1 + d.1, a.2 + d.2)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn preserves_spaces_in_shorthand_values() {
+        let stylesheet = parse_css(".box { margin: 0 auto; padding: 10px 15px; }");
+        let declarations = &stylesheet.rules[0].declarations;
+
+        assert_eq!(declarations[0].property, "margin");
+        assert!(matches!(
+            declarations[0].value,
+            CssDeclarationValue::Multiple(ref values) if values.len() == 2
+        ));
+        assert_eq!(declarations[1].property, "padding");
+        assert!(matches!(
+            declarations[1].value,
+            CssDeclarationValue::Multiple(ref values) if values.len() == 2
+        ));
     }
 }
