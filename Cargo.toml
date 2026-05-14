@@ -2,12 +2,13 @@
 name = "oxibrowser"
 version = "0.1.0"
 edition = "2021"
-description = "%100 Rust ile yazılmış web tarayıcısı - OxiBrowser"
+description = "Rust shell ve native WebView motoru ile Chrome-benzeri web tarayıcısı - OxiBrowser"
 
 [dependencies]
 # Window & UI
 winit = "0.30"
 softbuffer = "0.4"
+wry = { version = "0.55", features = ["devtools"] }
 
 # 2D Rendering
 tiny-skia = "0.11"
@@ -23,6 +24,11 @@ reqwest = { version = "0.12", default-features = false, features = [
     "rustls-tls",
 ] }
 url = "2.5"
+
+# Persistence
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+dirs = "6"
 
 # JavaScript - devre dışı (boa_engine uyumluluk sorunu)
 # boa_engine = "0.18"

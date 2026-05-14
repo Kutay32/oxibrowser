@@ -5,16 +5,204 @@ use crate::html;
 use crate::layout::{self, LayoutBox};
 use crate::net;
 use crate::style;
+use crate::types::Color;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::path::PathBuf;
+use std::time::{SystemTime, UNIX_EPOCH};
+
+pub const DEFAULT_ZOOM_PERCENT: u16 = 100;
+pub const ZOOM_PRESETS: &[u16] = &[
+    25, 33, 50, 67, 75, 80, 90, 100, 110, 125, 150, 175, 200, 250, 300, 400, 500,
+];
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum NavigationTarget {
+    Url(String),
+    Html { url: String, html: String },
+}
 
 /// Sekme bilgisi
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Tab {
     pub id: u32,
     pub title: String,
     pub url: String,
     pub history: Vec<String>,
     pub history_pos: usize,
+    pub zoom_percent: u16,
+    pub loading: bool,
+    pub incognito: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct Bookmark {
+    pub title: String,
+    pub url: String,
+    pub created_at: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct HistoryEntry {
+    pub title: String,
+    pub url: String,
+    pub visited_at: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum DownloadState {
+    InProgress,
+    Completed,
+    Failed,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DownloadItem {
+    pub url: String,
+    pub path: Option<PathBuf>,
+    pub state: DownloadState,
+    pub started_at: u64,
+    pub finished_at: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PasswordCredential {
+    pub origin: String,
+    pub username: String,
+    pub password: String,
+    pub updated_at: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ExtensionItem {
+    pub name: String,
+    pub path: PathBuf,
+    pub enabled: bool,
+    pub installed_at: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BrowserSettings {
+    pub default_search_url: String,
+    pub restore_session: bool,
+    pub home_url: String,
+    #[serde(default)]
+    pub sync_snapshot_path: Option<PathBuf>,
+    #[serde(default = "default_extension_store_url")]
+    pub extension_store_url: String,
+}
+
+impl Default for BrowserSettings {
+    fn default() -> Self {
+        Self {
+            default_search_url: "https://www.google.com/search?q={query}".to_string(),
+            restore_session: true,
+            home_url: "about:welcome".to_string(),
+            sync_snapshot_path: None,
+            extension_store_url: default_extension_store_url(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct ProfileData {
+    #[serde(default)]
+    pub settings: BrowserSettings,
+    #[serde(default)]
+    pub bookmarks: Vec<Bookmark>,
+    #[serde(default)]
+    pub history: Vec<HistoryEntry>,
+    #[serde(default)]
+    pub downloads: Vec<DownloadItem>,
+    #[serde(default)]
+    pub passwords: Vec<PasswordCredential>,
+    #[serde(default)]
+    pub extensions: Vec<ExtensionItem>,
+    #[serde(default)]
+    pub session_tabs: Vec<Tab>,
+    #[serde(default)]
+    pub active_tab: usize,
+}
+
+#[derive(Debug, Clone)]
+pub struct ProfileStore {
+    pub path: PathBuf,
+    pub data: ProfileData,
+}
+
+impl ProfileStore {
+    pub fn load_default() -> Self {
+        let path = default_profile_path();
+        Self::load_from_path(path)
+    }
+
+    pub fn load_from_path(path: PathBuf) -> Self {
+        let data = std::fs::read_to_string(&path)
+            .ok()
+            .and_then(|text| serde_json::from_str::<ProfileData>(&text).ok())
+            .unwrap_or_default();
+        Self { path, data }
+    }
+
+    pub fn save(&self) -> Result<(), String> {
+        if let Some(parent) = self.path.parent() {
+            std::fs::create_dir_all(parent)
+                .map_err(|e| format!("Profil klasörü oluşturulamadı: {}", e))?;
+        }
+
+        let json = serde_json::to_string_pretty(&self.data)
+            .map_err(|e| format!("Profil JSON yazılamadı: {}", e))?;
+        std::fs::write(&self.path, json).map_err(|e| format!("Profil kaydedilemedi: {}", e))
+    }
+}
+
+fn default_profile_path() -> PathBuf {
+    dirs::data_local_dir()
+        .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")))
+        .join("OxiBrowser")
+        .join("profile.json")
+}
+
+fn default_sync_snapshot_path() -> PathBuf {
+    default_profile_path()
+        .parent()
+        .map(|path| path.join("profile-sync.json"))
+        .unwrap_or_else(|| PathBuf::from("profile-sync.json"))
+}
+
+fn default_extension_store_url() -> String {
+    "https://chromewebstore.google.com/".to_string()
+}
+
+fn now_secs() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+fn title_for_url(url: &str) -> String {
+    match url {
+        "about:welcome" => "OxiBrowser".to_string(),
+        "about:blank" => "Yeni Sekme".to_string(),
+        "about:history" => "Geçmiş".to_string(),
+        "about:downloads" => "İndirilenler".to_string(),
+        "about:bookmarks" => "Yer İmleri".to_string(),
+        "about:settings" => "Ayarlar".to_string(),
+        "about:passwords" => "Şifreler".to_string(),
+        "about:sync" => "Sync".to_string(),
+        "about:extensions" => "Uzantılar".to_string(),
+        "about:devtools" => "DevTools".to_string(),
+        _ => url.to_string(),
+    }
+}
+
+pub fn nearest_zoom_preset(value: u16) -> u16 {
+    ZOOM_PRESETS
+        .iter()
+        .copied()
+        .min_by_key(|preset| preset.abs_diff(value))
+        .unwrap_or(DEFAULT_ZOOM_PERCENT)
 }
 
 /// Browser ana durumu
@@ -38,6 +226,10 @@ pub struct Browser {
     pub url_bar_select_all: bool,
     /// Viewport height for scroll calculations
     pub viewport_height: f32,
+    pub profile: ProfileStore,
+    pub pending_new_tabs: Vec<String>,
+    pub last_find_query: String,
+    pub find_bar_active: bool,
 }
 
 impl Browser {
@@ -59,6 +251,10 @@ impl Browser {
             url_bar_text: String::new(),
             url_bar_select_all: false,
             viewport_height: 600.0,
+            profile: ProfileStore::load_default(),
+            pending_new_tabs: Vec::new(),
+            last_find_query: String::new(),
+            find_bar_active: false,
         }
     }
 
@@ -82,6 +278,9 @@ impl Browser {
             url: initial_url.clone(),
             history: vec![initial_url],
             history_pos: 0,
+            zoom_percent: DEFAULT_ZOOM_PERCENT,
+            loading: false,
+            incognito: false,
         };
 
         self.tabs.push(tab);
@@ -91,13 +290,609 @@ impl Browser {
 
     /// Yeni sekme aç ve içeriğini hazırla.
     pub fn open_new_tab(&mut self, url: Option<&str>) -> u32 {
-        let id = self.new_tab(url.unwrap_or(""));
-        if let Some(url) = url {
-            self.load_url_sync(url);
-        } else {
-            self.load_welcome_page();
+        self.new_tab(url.unwrap_or(""))
+    }
+
+    pub fn restore_session_or_welcome(&mut self, initial_url: Option<&str>) {
+        if let Some(url) = initial_url {
+            self.tabs.clear();
+            self.active_tab = 0;
+            self.new_tab(url);
+            self.sync_active_tab_to_globals();
+            return;
         }
-        id
+
+        if self.profile.data.settings.restore_session && !self.profile.data.session_tabs.is_empty()
+        {
+            self.tabs = self.profile.data.session_tabs.clone();
+            self.active_tab = self
+                .profile
+                .data
+                .active_tab
+                .min(self.tabs.len().saturating_sub(1));
+            self.next_tab_id = self
+                .tabs
+                .iter()
+                .map(|tab| tab.id)
+                .max()
+                .unwrap_or(0)
+                .saturating_add(1);
+        }
+
+        if self.tabs.is_empty() {
+            let home = self.profile.data.settings.home_url.clone();
+            self.new_tab(&home);
+        }
+
+        self.sync_active_tab_to_globals();
+    }
+
+    pub fn active_tab_id(&self) -> Option<u32> {
+        self.tabs.get(self.active_tab).map(|tab| tab.id)
+    }
+
+    pub fn active_tab(&self) -> Option<&Tab> {
+        self.tabs.get(self.active_tab)
+    }
+
+    pub fn active_tab_mut(&mut self) -> Option<&mut Tab> {
+        self.tabs.get_mut(self.active_tab)
+    }
+
+    pub fn tab(&self, id: u32) -> Option<&Tab> {
+        self.tabs.iter().find(|tab| tab.id == id)
+    }
+
+    pub fn switch_to_tab_id(&mut self, id: u32) -> bool {
+        if let Some(index) = self.tabs.iter().position(|tab| tab.id == id) {
+            self.active_tab = index;
+            self.sync_active_tab_to_globals();
+            true
+        } else {
+            false
+        }
+    }
+
+    pub fn close_tab_by_id(&mut self, id: u32) -> bool {
+        if self.tabs.len() <= 1 {
+            return false;
+        }
+        let Some(index) = self.tabs.iter().position(|tab| tab.id == id) else {
+            return false;
+        };
+        self.tabs.remove(index);
+        if self.active_tab >= self.tabs.len() {
+            self.active_tab = self.tabs.len().saturating_sub(1);
+        }
+        self.sync_active_tab_to_globals();
+        self.persist_session();
+        true
+    }
+
+    pub fn plan_navigation(&mut self, input: &str) -> NavigationTarget {
+        let url = net::normalize_url(input);
+        if matches!(url.as_str(), "about:sync-export" | "about:sync-import") {
+            let result = if url == "about:sync-export" {
+                self.export_sync_snapshot()
+            } else {
+                self.import_sync_snapshot()
+            };
+            self.status_message = result.unwrap_or_else(|err| err);
+            self.current_url = "about:sync".to_string();
+            self.url_bar_text = self.current_url.clone();
+            self.url_bar_focused = false;
+            self.url_bar_select_all = false;
+            self.find_bar_active = false;
+            self.scroll_offset = 0.0;
+            if let Some(tab) = self.active_tab_mut() {
+                tab.loading = false;
+                tab.url = "about:sync".to_string();
+                tab.title = title_for_url("about:sync");
+            }
+            self.persist_session();
+            return NavigationTarget::Html {
+                html: self.about_page_html("about:sync"),
+                url: "about:sync".to_string(),
+            };
+        }
+
+        if url == "about:clear-passwords" {
+            self.clear_passwords();
+            self.current_url = "about:passwords".to_string();
+            self.url_bar_text = self.current_url.clone();
+            self.url_bar_focused = false;
+            self.url_bar_select_all = false;
+            self.find_bar_active = false;
+            if let Some(tab) = self.active_tab_mut() {
+                tab.loading = false;
+                tab.url = "about:passwords".to_string();
+                tab.title = title_for_url("about:passwords");
+            }
+            self.persist_session();
+            return NavigationTarget::Html {
+                html: self.about_page_html("about:passwords"),
+                url: "about:passwords".to_string(),
+            };
+        }
+
+        self.loading = true;
+        self.status_message = format!("{} yükleniyor...", url);
+        self.current_url = url.clone();
+        self.url_bar_text = url.clone();
+        self.url_bar_focused = false;
+        self.url_bar_select_all = false;
+        self.find_bar_active = false;
+        self.scroll_offset = 0.0;
+
+        let title = title_for_url(&url);
+        if let Some(tab) = self.active_tab_mut() {
+            tab.loading = true;
+            tab.url = url.clone();
+            tab.title = title;
+            let already_current = tab
+                .history
+                .get(tab.history_pos)
+                .map(|current| current == &url)
+                .unwrap_or(false);
+            if !already_current {
+                tab.history.truncate(tab.history_pos + 1);
+                tab.history.push(url.clone());
+                tab.history_pos = tab.history.len().saturating_sub(1);
+            }
+        }
+        self.persist_session();
+
+        if url.starts_with("about:") {
+            NavigationTarget::Html {
+                html: self.about_page_html(&url),
+                url,
+            }
+        } else {
+            NavigationTarget::Url(url)
+        }
+    }
+
+    pub fn active_navigation_target(&self) -> NavigationTarget {
+        let url = self
+            .active_tab()
+            .map(|tab| tab.url.clone())
+            .unwrap_or_else(|| "about:welcome".to_string());
+        self.navigation_target_for_url(&url)
+    }
+
+    pub fn navigation_target_for_url(&self, url: &str) -> NavigationTarget {
+        if url.starts_with("about:") {
+            NavigationTarget::Html {
+                html: self.about_page_html(&url),
+                url: url.to_string(),
+            }
+        } else {
+            NavigationTarget::Url(url.to_string())
+        }
+    }
+
+    pub fn mark_tab_loading(&mut self, tab_id: u32, url: &str) {
+        if let Some(tab) = self.tabs.iter_mut().find(|tab| tab.id == tab_id) {
+            tab.loading = true;
+            tab.url = url.to_string();
+            let already_current = tab
+                .history
+                .get(tab.history_pos)
+                .map(|current| current == url)
+                .unwrap_or(false);
+            if !already_current && !url.trim().is_empty() {
+                tab.history.truncate(tab.history_pos + 1);
+                tab.history.push(url.to_string());
+                tab.history_pos = tab.history.len().saturating_sub(1);
+            }
+        }
+        if self.active_tab_id() == Some(tab_id) {
+            self.current_url = url.to_string();
+            self.url_bar_text = url.to_string();
+            self.loading = true;
+            self.status_message = format!("{} yükleniyor...", url);
+        }
+    }
+
+    pub fn finish_tab_load(&mut self, tab_id: u32, url: &str) {
+        let mut title_for_history = String::new();
+        if let Some(tab) = self.tabs.iter_mut().find(|tab| tab.id == tab_id) {
+            tab.loading = false;
+            if !url.trim().is_empty() {
+                tab.url = url.to_string();
+                if let Some(current) = tab.history.get_mut(tab.history_pos) {
+                    *current = url.to_string();
+                }
+            }
+            title_for_history = tab.title.clone();
+        }
+
+        if self.active_tab_id() == Some(tab_id) {
+            self.current_url = url.to_string();
+            self.url_bar_text = url.to_string();
+            self.loading = false;
+            self.status_message = "Hazır".to_string();
+        }
+
+        if !url.starts_with("about:") && !url.trim().is_empty() {
+            self.push_history_entry(title_for_history, url.to_string());
+        }
+        self.persist_session();
+    }
+
+    pub fn update_tab_title(&mut self, tab_id: u32, title: &str) {
+        let clean = title.trim();
+        if clean.is_empty() {
+            return;
+        }
+        if let Some(tab) = self.tabs.iter_mut().find(|tab| tab.id == tab_id) {
+            tab.title = clean.to_string();
+        }
+        if self.active_tab_id() == Some(tab_id) {
+            self.page_title = clean.to_string();
+        }
+        self.persist_session();
+    }
+
+    pub fn queue_new_tab(&mut self, url: String) {
+        self.pending_new_tabs.push(url);
+    }
+
+    pub fn take_pending_new_tabs(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.pending_new_tabs)
+    }
+
+    pub fn zoom_in(&mut self) -> u16 {
+        let current = self
+            .active_tab()
+            .map(|tab| tab.zoom_percent)
+            .unwrap_or(DEFAULT_ZOOM_PERCENT);
+        let next = ZOOM_PRESETS
+            .iter()
+            .copied()
+            .find(|preset| *preset > current)
+            .unwrap_or(*ZOOM_PRESETS.last().unwrap_or(&DEFAULT_ZOOM_PERCENT));
+        self.set_active_zoom(next)
+    }
+
+    pub fn zoom_out(&mut self) -> u16 {
+        let current = self
+            .active_tab()
+            .map(|tab| tab.zoom_percent)
+            .unwrap_or(DEFAULT_ZOOM_PERCENT);
+        let next = ZOOM_PRESETS
+            .iter()
+            .rev()
+            .copied()
+            .find(|preset| *preset < current)
+            .unwrap_or(*ZOOM_PRESETS.first().unwrap_or(&DEFAULT_ZOOM_PERCENT));
+        self.set_active_zoom(next)
+    }
+
+    pub fn reset_zoom(&mut self) -> u16 {
+        self.set_active_zoom(DEFAULT_ZOOM_PERCENT)
+    }
+
+    pub fn set_active_zoom(&mut self, zoom_percent: u16) -> u16 {
+        let zoom_percent = nearest_zoom_preset(zoom_percent);
+        if let Some(tab) = self.active_tab_mut() {
+            tab.zoom_percent = zoom_percent;
+        }
+        self.status_message = format!("Yakınlaştırma: {}%", zoom_percent);
+        self.persist_session();
+        zoom_percent
+    }
+
+    pub fn toggle_bookmark_active(&mut self) -> bool {
+        let Some(tab) = self.active_tab().cloned() else {
+            return false;
+        };
+        if let Some(index) = self
+            .profile
+            .data
+            .bookmarks
+            .iter()
+            .position(|bookmark| bookmark.url == tab.url)
+        {
+            self.profile.data.bookmarks.remove(index);
+            self.status_message = "Yer imi kaldırıldı".to_string();
+            let _ = self.profile.save();
+            false
+        } else {
+            self.profile.data.bookmarks.push(Bookmark {
+                title: tab.title,
+                url: tab.url,
+                created_at: now_secs(),
+            });
+            self.status_message = "Yer imi eklendi".to_string();
+            let _ = self.profile.save();
+            true
+        }
+    }
+
+    pub fn is_active_bookmarked(&self) -> bool {
+        self.active_tab()
+            .map(|tab| {
+                self.profile
+                    .data
+                    .bookmarks
+                    .iter()
+                    .any(|bookmark| bookmark.url == tab.url)
+            })
+            .unwrap_or(false)
+    }
+
+    pub fn record_download_started(&mut self, url: String, path: PathBuf) {
+        self.profile.data.downloads.push(DownloadItem {
+            url: url.clone(),
+            path: Some(path),
+            state: DownloadState::InProgress,
+            started_at: now_secs(),
+            finished_at: None,
+        });
+        self.status_message = format!("İndirme başladı: {}", url);
+        let _ = self.profile.save();
+    }
+
+    pub fn record_download_finished(&mut self, url: String, path: Option<PathBuf>, success: bool) {
+        if let Some(item) = self
+            .profile
+            .data
+            .downloads
+            .iter_mut()
+            .rev()
+            .find(|download| download.url == url && download.state == DownloadState::InProgress)
+        {
+            if path.is_some() {
+                item.path = path;
+            }
+            item.state = if success {
+                DownloadState::Completed
+            } else {
+                DownloadState::Failed
+            };
+            item.finished_at = Some(now_secs());
+        }
+        self.status_message = if success {
+            "İndirme tamamlandı".to_string()
+        } else {
+            "İndirme başarısız".to_string()
+        };
+        let _ = self.profile.save();
+    }
+
+    pub fn clear_browsing_data(&mut self) {
+        self.profile.data.history.clear();
+        self.profile.data.downloads.clear();
+        self.status_message = "Geçmiş ve indirme kayıtları temizlendi".to_string();
+        let _ = self.profile.save();
+    }
+
+    pub fn save_password_for_url(&mut self, url: &str, username: &str, password: &str) -> bool {
+        let Some(origin) = Self::origin_for_url(url) else {
+            return false;
+        };
+        let username = username.trim();
+        if username.is_empty() || password.is_empty() {
+            return false;
+        }
+
+        if let Some(existing) = self
+            .profile
+            .data
+            .passwords
+            .iter_mut()
+            .find(|item| item.origin == origin && item.username == username)
+        {
+            existing.password = password.to_string();
+            existing.updated_at = now_secs();
+        } else {
+            self.profile.data.passwords.push(PasswordCredential {
+                origin,
+                username: username.to_string(),
+                password: password.to_string(),
+                updated_at: now_secs(),
+            });
+        }
+        self.status_message = "Şifre kasasına kaydedildi".to_string();
+        let _ = self.profile.save();
+        true
+    }
+
+    pub fn credentials_for_url(&self, url: &str) -> Vec<PasswordCredential> {
+        let Some(origin) = Self::origin_for_url(url) else {
+            return Vec::new();
+        };
+        self.profile
+            .data
+            .passwords
+            .iter()
+            .filter(|item| item.origin == origin)
+            .cloned()
+            .collect()
+    }
+
+    pub fn clear_passwords(&mut self) {
+        self.profile.data.passwords.clear();
+        self.status_message = "Kayıtlı şifreler temizlendi".to_string();
+        let _ = self.profile.save();
+    }
+
+    pub fn export_sync_snapshot(&mut self) -> Result<String, String> {
+        let path = self
+            .profile
+            .data
+            .settings
+            .sync_snapshot_path
+            .clone()
+            .unwrap_or_else(default_sync_snapshot_path);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)
+                .map_err(|e| format!("Sync klasörü oluşturulamadı: {}", e))?;
+        }
+        let json = serde_json::to_string_pretty(&self.profile.data)
+            .map_err(|e| format!("Sync JSON hazırlanamadı: {}", e))?;
+        std::fs::write(&path, json).map_err(|e| format!("Sync yazılamadı: {}", e))?;
+        self.profile.data.settings.sync_snapshot_path = Some(path.clone());
+        let _ = self.profile.save();
+        Ok(format!("Sync snapshot yazıldı: {}", path.display()))
+    }
+
+    pub fn import_sync_snapshot(&mut self) -> Result<String, String> {
+        let path = self
+            .profile
+            .data
+            .settings
+            .sync_snapshot_path
+            .clone()
+            .unwrap_or_else(default_sync_snapshot_path);
+        let text = std::fs::read_to_string(&path)
+            .map_err(|e| format!("Sync snapshot okunamadı: {}", e))?;
+        let imported: ProfileData =
+            serde_json::from_str(&text).map_err(|e| format!("Sync JSON bozuk: {}", e))?;
+        self.merge_profile_data(imported);
+        self.profile.data.settings.sync_snapshot_path = Some(path.clone());
+        let _ = self.profile.save();
+        Ok(format!("Sync snapshot içe aktarıldı: {}", path.display()))
+    }
+
+    pub fn set_find_query(&mut self, query: String) {
+        self.last_find_query = query;
+    }
+
+    pub fn persist_session(&mut self) {
+        self.profile.data.session_tabs = self.tabs.clone();
+        self.profile.data.active_tab = self.active_tab;
+        let _ = self.profile.save();
+    }
+
+    pub fn origin_for_url(url: &str) -> Option<String> {
+        let parsed = url::Url::parse(url).ok()?;
+        match parsed.scheme() {
+            "http" | "https" => {
+                let host = parsed.host_str()?;
+                let port = parsed.port().map(|p| format!(":{}", p)).unwrap_or_default();
+                Some(format!("{}://{}{}", parsed.scheme(), host, port))
+            }
+            _ => None,
+        }
+    }
+
+    fn sync_active_tab_to_globals(&mut self) {
+        if let Some(tab) = self.active_tab() {
+            let url = tab.url.clone();
+            let title = tab.title.clone();
+            let loading = tab.loading;
+            self.current_url = url.clone();
+            self.url_bar_text = url;
+            self.page_title = title;
+            self.loading = loading;
+        }
+    }
+
+    fn push_history_entry(&mut self, title: String, url: String) {
+        if url.trim().is_empty() {
+            return;
+        }
+        if self
+            .profile
+            .data
+            .history
+            .last()
+            .map(|entry| entry.url == url)
+            .unwrap_or(false)
+        {
+            return;
+        }
+        self.profile.data.history.push(HistoryEntry {
+            title: if title.trim().is_empty() {
+                url.clone()
+            } else {
+                title
+            },
+            url,
+            visited_at: now_secs(),
+        });
+        if self.profile.data.history.len() > 2000 {
+            let extra = self.profile.data.history.len() - 2000;
+            self.profile.data.history.drain(0..extra);
+        }
+        let _ = self.profile.save();
+    }
+
+    fn merge_profile_data(&mut self, imported: ProfileData) {
+        self.profile.data.settings = imported.settings;
+        for bookmark in imported.bookmarks {
+            if !self
+                .profile
+                .data
+                .bookmarks
+                .iter()
+                .any(|existing| existing.url == bookmark.url)
+            {
+                self.profile.data.bookmarks.push(bookmark);
+            }
+        }
+        for history in imported.history {
+            if !self
+                .profile
+                .data
+                .history
+                .iter()
+                .any(|existing| existing.url == history.url && existing.visited_at == history.visited_at)
+            {
+                self.profile.data.history.push(history);
+            }
+        }
+        for password in imported.passwords {
+            if let Some(existing) = self
+                .profile
+                .data
+                .passwords
+                .iter_mut()
+                .find(|item| item.origin == password.origin && item.username == password.username)
+            {
+                if password.updated_at >= existing.updated_at {
+                    *existing = password;
+                }
+            } else {
+                self.profile.data.passwords.push(password);
+            }
+        }
+        for extension in imported.extensions {
+            if !self
+                .profile
+                .data
+                .extensions
+                .iter()
+                .any(|existing| existing.path == extension.path)
+            {
+                self.profile.data.extensions.push(extension);
+            }
+        }
+        if !imported.session_tabs.is_empty() {
+            self.profile.data.session_tabs = imported.session_tabs;
+            self.profile.data.active_tab = imported.active_tab;
+        }
+    }
+
+    fn about_page_html(&self, url: &str) -> String {
+        match url {
+            "about:blank" => {
+                "<html><head><title>Yeni Sekme</title></head><body></body></html>".to_string()
+            }
+            "about:version" => self.about_version_html(),
+            "about:history" => self.history_html(),
+            "about:downloads" => self.downloads_html(),
+            "about:bookmarks" => self.bookmarks_html(),
+            "about:settings" => self.settings_html(),
+            "about:passwords" => self.passwords_html(),
+            "about:sync" => self.sync_html(),
+            "about:extensions" => self.extensions_html(),
+            "about:devtools" => self.devtools_html(),
+            "about:welcome" => self.welcome_html(),
+            _ => self.error_page_html("Bilinmeyen about sayfası", url, "Bu iç sayfa bulunamadı."),
+        }
     }
 
     /// URL'ye git
@@ -258,12 +1053,19 @@ impl Browser {
         if let Some(ref mut layout_root) = self.layout_result {
             layout::layout_document(layout_root, viewport_width, viewport_height);
         }
+        self.clamp_scroll_offset();
     }
 
     /// Sayfayı kaydır (delta pixels, pozitif = aşağı)
     pub fn scroll_by(&mut self, delta: f32) {
+        self.scroll_offset += delta;
+        self.clamp_scroll_offset();
+    }
+
+    /// Mevcut kaydırma konumunu sayfanın geçerli sınırlarına sabitle.
+    pub fn clamp_scroll_offset(&mut self) {
         let max_scroll = self.max_scroll_offset();
-        self.scroll_offset = (self.scroll_offset + delta).clamp(0.0, max_scroll);
+        self.scroll_offset = self.scroll_offset.clamp(0.0, max_scroll);
     }
 
     /// Maksimum kaydırma mesafesi
@@ -277,6 +1079,26 @@ impl Browser {
         }
     }
 
+    /// Viewport'un tamamına uygulanacak canvas arka plan rengini bul.
+    pub fn canvas_background_color(&self) -> Color {
+        self.first_element_background("body")
+            .or_else(|| self.first_element_background("html"))
+            .unwrap_or(Color::WHITE)
+    }
+
+    fn first_element_background(&self, tag: &str) -> Option<Color> {
+        let dom = self.dom_tree.as_ref()?;
+        for node in dom.elements_by_tag(tag) {
+            if let Some(style) = self.styles.get(&node.id) {
+                let color = style.background_color;
+                if color.a > 0.0 {
+                    return Some(color);
+                }
+            }
+        }
+        None
+    }
+
     /// URL bar metnini güncelle
     pub fn set_url_bar_text(&mut self, text: &str) {
         self.url_bar_text = text.to_string();
@@ -287,6 +1109,7 @@ impl Browser {
     pub fn focus_url_bar(&mut self, select_all: bool) {
         self.url_bar_focused = true;
         self.url_bar_select_all = select_all;
+        self.find_bar_active = false;
         self.url_bar_text = self.current_url.clone();
     }
 
@@ -294,6 +1117,7 @@ impl Browser {
     pub fn blur_url_bar(&mut self) {
         self.url_bar_focused = false;
         self.url_bar_select_all = false;
+        self.find_bar_active = false;
         self.url_bar_text = self.current_url.clone();
     }
 
@@ -454,6 +1278,7 @@ impl Browser {
 
         let tab = &mut self.tabs[self.active_tab];
         tab.url = url.to_string();
+        tab.loading = false;
         if !self.page_title.trim().is_empty() {
             tab.title = self.page_title.clone();
         }
@@ -473,14 +1298,7 @@ impl Browser {
     }
 
     fn render_about_page(&mut self, url: &str, update_history: bool) {
-        let html = match url {
-            "about:blank" => {
-                "<html><head><title>Boş Sayfa</title></head><body></body></html>".to_string()
-            }
-            "about:version" => self.about_version_html(),
-            "about:welcome" => self.welcome_html(),
-            _ => self.error_page_html("Bilinmeyen about sayfası", url, "Bu iç sayfa bulunamadı."),
-        };
+        let html = self.about_page_html(url);
 
         self.status_message = "Hazır".to_string();
         self.parse_and_render(&html, url);
@@ -561,6 +1379,117 @@ impl Browser {
 </html>
 "#
         .to_string()
+    }
+
+    fn history_html(&self) -> String {
+        let mut items = String::new();
+        for entry in self.profile.data.history.iter().rev().take(200) {
+            items.push_str(&format!(
+                r#"<li><a href="{url}">{title}</a><small>{url}</small></li>"#,
+                title = Self::escape_html(&entry.title),
+                url = Self::escape_html(&entry.url)
+            ));
+        }
+        if items.is_empty() {
+            items.push_str("<li>Henüz geçmiş yok.</li>");
+        }
+        self.list_page_html("Geçmiş", "Ziyaret edilen sayfalar", &items)
+    }
+
+    fn downloads_html(&self) -> String {
+        let mut items = String::new();
+        for item in self.profile.data.downloads.iter().rev().take(200) {
+            let state = match item.state {
+                DownloadState::InProgress => "Sürüyor",
+                DownloadState::Completed => "Tamamlandı",
+                DownloadState::Failed => "Başarısız",
+            };
+            let path = item
+                .path
+                .as_ref()
+                .map(|p| p.display().to_string())
+                .unwrap_or_else(|| "Konum bilinmiyor".to_string());
+            items.push_str(&format!(
+                r#"<li><a href="{url}">{url}</a><small>{state} · {path}</small></li>"#,
+                url = Self::escape_html(&item.url),
+                state = state,
+                path = Self::escape_html(&path)
+            ));
+        }
+        if items.is_empty() {
+            items.push_str("<li>Henüz indirme yok.</li>");
+        }
+        self.list_page_html("İndirilenler", "İndirme kayıtları", &items)
+    }
+
+    fn bookmarks_html(&self) -> String {
+        let mut items = String::new();
+        for bookmark in self.profile.data.bookmarks.iter().rev() {
+            items.push_str(&format!(
+                r#"<li><a href="{url}">{title}</a><small>{url}</small></li>"#,
+                title = Self::escape_html(&bookmark.title),
+                url = Self::escape_html(&bookmark.url)
+            ));
+        }
+        if items.is_empty() {
+            items.push_str("<li>Henüz yer imi yok.</li>");
+        }
+        self.list_page_html("Yer İmleri", "Kaydedilen sayfalar", &items)
+    }
+
+    fn settings_html(&self) -> String {
+        let settings = &self.profile.data.settings;
+        let items = format!(
+            r#"
+            <li><strong>Ana sayfa</strong><small>{home}</small></li>
+            <li><strong>Varsayılan arama</strong><small>{search}</small></li>
+            <li><strong>Session restore</strong><small>{restore}</small></li>
+            <li><strong>Profil dosyası</strong><small>{profile}</small></li>
+            "#,
+            home = Self::escape_html(&settings.home_url),
+            search = Self::escape_html(&settings.default_search_url),
+            restore = if settings.restore_session {
+                "Açık"
+            } else {
+                "Kapalı"
+            },
+            profile = Self::escape_html(&self.profile.path.display().to_string())
+        );
+        self.list_page_html("Ayarlar", "Temel browser ayarları", &items)
+    }
+
+    fn list_page_html(&self, title: &str, subtitle: &str, items: &str) -> String {
+        format!(
+            r#"
+<!DOCTYPE html>
+<html>
+<head>
+    <title>{title}</title>
+    <style>
+        body {{ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; margin: 0; background: #f8fafc; color: #1f2937; }}
+        main {{ max-width: 920px; margin: 0 auto; padding: 36px 28px; }}
+        h1 {{ margin: 0 0 6px; color: #111827; font-size: 32px; }}
+        p {{ margin: 0 0 22px; color: #64748b; }}
+        ul {{ list-style: none; margin: 0; padding: 0; background: white; border: 1px solid #d7dee8; }}
+        li {{ padding: 14px 16px; border-bottom: 1px solid #e5e7eb; }}
+        li:last-child {{ border-bottom: 0; }}
+        a, strong {{ display: block; color: #0f766e; text-decoration: none; font-size: 15px; }}
+        small {{ display: block; margin-top: 5px; color: #64748b; word-break: break-all; }}
+    </style>
+</head>
+<body>
+    <main>
+        <h1>{title}</h1>
+        <p>{subtitle}</p>
+        <ul>{items}</ul>
+    </main>
+</body>
+</html>
+"#,
+            title = Self::escape_html(title),
+            subtitle = Self::escape_html(subtitle),
+            items = items
+        )
     }
 
     fn about_version_html(&self) -> String {
@@ -689,5 +1618,163 @@ mod tests {
 
         browser.parse_and_render("<html><body>Two</body></html>", "about:second");
         assert!(browser.stylesheet.rules.is_empty());
+    }
+
+    #[test]
+    fn canvas_background_prefers_body_over_html() {
+        let mut browser = Browser::new();
+        browser.new_tab("");
+        browser.parse_and_render(
+            r#"
+            <html>
+                <head><style>html { background: #010203; } body { background: #f8fafc; }</style></head>
+                <body>Welcome</body>
+            </html>
+            "#,
+            "about:test",
+        );
+
+        assert_eq!(
+            browser.canvas_background_color(),
+            Color::new(248, 250, 252, 255)
+        );
+    }
+
+    #[test]
+    fn canvas_background_uses_html_when_body_is_transparent() {
+        let mut browser = Browser::new();
+        browser.new_tab("");
+        browser.parse_and_render(
+            r#"
+            <html>
+                <head><style>html { background: #0a141e; } body { background: transparent; }</style></head>
+                <body>Welcome</body>
+            </html>
+            "#,
+            "about:test",
+        );
+
+        assert_eq!(
+            browser.canvas_background_color(),
+            Color::new(10, 20, 30, 255)
+        );
+    }
+
+    #[test]
+    fn canvas_background_falls_back_to_white() {
+        let mut browser = Browser::new();
+        browser.new_tab("");
+        browser.parse_and_render("<html><body>Welcome</body></html>", "about:test");
+
+        assert_eq!(browser.canvas_background_color(), Color::WHITE);
+    }
+
+    #[test]
+    fn relayout_clamps_scroll_offset_to_new_viewport() {
+        let mut browser = Browser::new();
+        browser.new_tab("");
+        browser.parse_and_render(
+            r#"<html><body style="height: 1000px;">Tall page</body></html>"#,
+            "about:test",
+        );
+
+        browser.relayout(400.0, 200.0);
+        browser.scroll_by(900.0);
+        assert!(browser.scroll_offset > 0.0);
+
+        browser.relayout(400.0, 2000.0);
+        assert_eq!(browser.scroll_offset, 0.0);
+    }
+
+    #[test]
+    fn zoom_presets_step_like_chrome() {
+        let mut browser = Browser::new();
+        browser.new_tab("about:welcome");
+
+        assert_eq!(browser.zoom_in(), 110);
+        assert_eq!(browser.zoom_out(), 100);
+        assert_eq!(browser.set_active_zoom(126), 125);
+        assert_eq!(browser.reset_zoom(), DEFAULT_ZOOM_PERCENT);
+    }
+
+    #[test]
+    fn bookmark_toggle_dedupes_by_url() {
+        let mut browser = Browser::new();
+        browser.profile = temp_profile_store("bookmark_toggle");
+        browser.new_tab("https://example.com");
+
+        assert!(browser.toggle_bookmark_active());
+        assert_eq!(browser.profile.data.bookmarks.len(), 1);
+        assert!(!browser.toggle_bookmark_active());
+        assert!(browser.profile.data.bookmarks.is_empty());
+    }
+
+    #[test]
+    fn profile_store_loads_saved_json_and_falls_back_on_bad_json() {
+        let path = temp_profile_path("profile_store");
+        let store = ProfileStore {
+            path: path.clone(),
+            data: ProfileData {
+                bookmarks: vec![Bookmark {
+                    title: "Example".to_string(),
+                    url: "https://example.com".to_string(),
+                    created_at: 1,
+                }],
+                ..ProfileData::default()
+            },
+        };
+        store.save().unwrap();
+
+        let loaded = ProfileStore::load_from_path(path.clone());
+        assert_eq!(loaded.data.bookmarks.len(), 1);
+
+        std::fs::write(&path, "{not json").unwrap();
+        let fallback = ProfileStore::load_from_path(path);
+        assert!(fallback.data.bookmarks.is_empty());
+    }
+
+    #[test]
+    fn restore_session_rehydrates_tabs_and_active_index() {
+        let mut browser = Browser::new();
+        browser.profile = temp_profile_store("session_restore");
+        browser.profile.data.session_tabs = vec![
+            test_tab(7, "https://one.example"),
+            test_tab(8, "https://two.example"),
+        ];
+        browser.profile.data.active_tab = 1;
+
+        browser.restore_session_or_welcome(None);
+
+        assert_eq!(browser.tabs.len(), 2);
+        assert_eq!(browser.active_tab_id(), Some(8));
+        assert_eq!(browser.current_url, "https://two.example");
+        assert_eq!(browser.next_tab_id, 9);
+    }
+
+    fn temp_profile_store(name: &str) -> ProfileStore {
+        ProfileStore {
+            path: temp_profile_path(name),
+            data: ProfileData::default(),
+        }
+    }
+
+    fn temp_profile_path(name: &str) -> PathBuf {
+        std::env::temp_dir().join(format!(
+            "oxibrowser-{name}-{}-profile.json",
+            std::process::id()
+        ))
+    }
+
+    fn test_tab(id: u32, url: &str) -> Tab {
+        Tab {
+            id,
+            title: url.to_string(),
+            url: url.to_string(),
+            history: vec![url.to_string()],
+            history_pos: 0,
+            zoom_percent: DEFAULT_ZOOM_PERCENT,
+            loading: false,
+            incognito: false,
+        }
     }
 }

@@ -1,19 +1,13 @@
 #![allow(dead_code)]
 
-/// OxiBrowser - %100 Rust web tarayıcısı
+/// OxiBrowser - Rust shell + native WebView web tarayıcısı
 ///
 /// # Mimarisi
-/// - HTML parsing: Kendi implementasyonumuz (SimpleHtmlParser)
-/// - CSS parsing: Kendi implementasyonumuz
-/// - Layout engine: Box model, block/inline layout
-/// - Render engine: tiny-skia ile 2D çizim
-/// - Networking: reqwest + rustls
+/// - Browser shell: winit + softbuffer + tiny-skia
+/// - Page engine: wry/native WebView (WKWebView/WebView2/WebKitGTK)
+/// - Profile persistence: JSON state
 /// - Window: winit + softbuffer
-/// - JavaScript: placeholder (MVP'de devre dışı)
-///
-/// # %100 Rust
-/// Hiçbir C/C++ kütüphanesi kullanılmamıştır.
-/// Tüm bağımlılıklar saf Rust implementasyonlarıdır.
+/// - Legacy custom parser/layout modules remain for local tests and fallback pages.
 mod browser;
 mod css;
 mod dom;
@@ -43,17 +37,16 @@ fn main() {
     // Browser oluştur
     let mut browser = Browser::new();
 
-    // Varsayılan sekmeyi aç
-    let _tab_id = browser.new_tab("");
-
     // Varsa komut satırı argümanından URL al
     let args: Vec<String> = std::env::args().collect();
-    if args.len() > 1 {
-        let url = &args[1];
+    let startup_url = args.get(1).map(|url| {
         log::info!("URL yükleniyor: {}", url);
-        browser.load_url_sync(url);
-    } else {
-        browser.load_welcome_page();
+        url.as_str()
+    });
+    browser.restore_session_or_welcome(startup_url);
+
+    if browser.tabs.is_empty() {
+        browser.new_tab("");
     }
 
     // UI'ı başlat

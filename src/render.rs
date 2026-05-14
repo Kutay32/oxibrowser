@@ -111,8 +111,17 @@ fn render_box(box_node: &LayoutBox, commands: &mut Vec<DisplayCommand>) {
 
 /// Display command'ları tiny-skia pixmap'e çiz
 pub fn render_to_pixmap(commands: &[DisplayCommand], width: u32, height: u32) -> tiny_skia::Pixmap {
+    render_to_pixmap_with_background(commands, width, height, Color::WHITE)
+}
+
+pub fn render_to_pixmap_with_background(
+    commands: &[DisplayCommand],
+    width: u32,
+    height: u32,
+    background: Color,
+) -> tiny_skia::Pixmap {
     let mut pixmap = tiny_skia::Pixmap::new(width, height).expect("Pixmap oluşturulamadı");
-    pixmap.fill(tiny_skia::Color::WHITE);
+    pixmap.fill(background.to_tiny_skia());
 
     for cmd in commands {
         render_command(cmd, &mut pixmap);
@@ -498,5 +507,38 @@ fn fill_rect_safe(
 
     if let Some(rect) = tiny_skia::Rect::from_xywh(x0, y0, width, height) {
         pixmap.fill_rect(rect, paint, tiny_skia::Transform::identity(), None);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn render_to_pixmap_with_background_fills_full_surface() {
+        let bg = Color::new(248, 250, 252, 255);
+        let pixmap = render_to_pixmap_with_background(&[], 12, 8, bg);
+
+        let top_left = pixmap.pixel(0, 0).unwrap();
+        let bottom_right = pixmap.pixel(11, 7).unwrap();
+
+        assert_eq!(
+            (
+                top_left.red(),
+                top_left.green(),
+                top_left.blue(),
+                top_left.alpha()
+            ),
+            (248, 250, 252, 255)
+        );
+        assert_eq!(
+            (
+                bottom_right.red(),
+                bottom_right.green(),
+                bottom_right.blue(),
+                bottom_right.alpha()
+            ),
+            (248, 250, 252, 255)
+        );
     }
 }
