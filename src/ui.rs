@@ -1,6 +1,7 @@
 /// Browser UI - winit + softbuffer ile pencere yönetimi
 use crate::browser::{Browser, NavigationTarget, DEFAULT_ZOOM_PERCENT};
 use crate::types::{Color, TextAlign};
+use serde::Deserialize;
 use softbuffer::Surface;
 use std::collections::HashMap;
 use std::num::NonZeroU32;
@@ -69,6 +70,7 @@ impl BrowserUI {
             mouse_down: false,
             modifiers: winit::keyboard::ModifiersState::empty(),
             webviews: HashMap::new(),
+            last_autofill_keys: HashMap::new(),
             scroll_target: 0.0,
             scroll_animating: false,
             last_scroll_frame: None,
@@ -94,10 +96,19 @@ struct BrowserApp {
     mouse_down: bool,
     modifiers: winit::keyboard::ModifiersState,
     webviews: HashMap<u32, WebView>,
+    last_autofill_keys: HashMap<u32, String>,
     scroll_target: f32,
     scroll_animating: bool,
     last_scroll_frame: Option<Instant>,
     needs_redraw: bool,
+}
+
+#[derive(Debug, Deserialize)]
+struct BrowserIpcMessage {
+    kind: String,
+    url: Option<String>,
+    username: Option<String>,
+    password: Option<String>,
 }
 
 #[derive(Clone)]
@@ -285,6 +296,9 @@ impl ApplicationHandler for BrowserApp {
                     let is_alt = self
                         .modifiers
                         .contains(winit::keyboard::ModifiersState::ALT);
+                    let is_shift = self
+                        .modifiers
+                        .contains(winit::keyboard::ModifiersState::SHIFT);
                     let primary = is_cmd || is_ctrl;
 
                     match event.physical_key {
@@ -382,6 +396,18 @@ impl ApplicationHandler for BrowserApp {
                             drop(browser);
                             self.navigate_active("about:settings");
                         }
+                        PhysicalKey::Code(KeyCode::KeyP) if primary && is_shift => {
+                            drop(browser);
+                            self.navigate_active("about:passwords");
+                        }
+                        PhysicalKey::Code(KeyCode::KeyS) if primary && is_shift => {
+                            drop(browser);
+                            self.navigate_active("about:sync");
+                        }
+                        PhysicalKey::Code(KeyCode::KeyE) if primary && is_shift => {
+                            drop(browser);
+                            self.navigate_active("about:extensions");
+                        }
                         PhysicalKey::Code(KeyCode::KeyB) if primary => {
                             drop(browser);
                             self.navigate_active("about:bookmarks");
@@ -470,6 +496,7 @@ impl ApplicationHandler for BrowserApp {
 
     fn about_to_wait(&mut self, _event_loop: &ActiveEventLoop) {
         self.drain_pending_new_tabs();
+        self.apply_password_autofill();
         let browser_loading = self
             .ui
             .lock()
@@ -560,6 +587,7 @@ impl BrowserApp {
         let browser_for_new_window = self.ui.clone();
         let browser_for_download_started = self.ui.clone();
         let browser_for_download_finished = self.ui.clone();
+        let browser_for_ipc = self.ui.clone();
 
         let mut builder = WebViewBuilder::new()
             .with_bounds(self.current_webview_bounds())
@@ -568,6 +596,20 @@ impl BrowserApp {
             .with_clipboard(true)
             .with_back_forward_navigation_gestures(true)
             .with_hotkeys_zoom(false)
+            .with_initialization_script(password_capture_script())
+            .with_ipc_handler(move |request| {
+                if let Ok(message) = serde_json::from_str::<BrowserIpcMessage>(request.body()) {
+                    if message.kind == "password-submit" {
+                        if let (Some(url), Some(username), Some(password)) =
+                            (message.url, message.username, message.password)
+                        {
+                            if let Ok(mut browser) = browser_for_ipc.lock() {
+                                browser.save_password_for_url(&url, &username, &password);
+                            }
+                        }
+                    }
+                }
+            })
             .with_navigation_handler(move |url| {
                 if let Ok(mut browser) = browser_for_nav.lock() {
                     browser.mark_tab_loading(tab_id, &url);
@@ -756,6 +798,7 @@ impl BrowserApp {
         for webview in self.webviews.values() {
             let _ = webview.clear_all_browsing_data();
         }
+        self.last_autofill_keys.clear();
         self.request_redraw();
     }
 
@@ -766,6 +809,40 @@ impl BrowserApp {
         };
         for url in pending {
             self.create_tab(&url);
+        }
+    }
+
+    fn apply_password_autofill(&mut self) {
+        let Some(tab_id) = self
+            .ui
+            .lock()
+            .ok()
+            .and_then(|browser| browser.active_tab_id())
+        else {
+            return;
+        };
+        let (url, credentials) = {
+            let browser = self.ui.lock().unwrap();
+            let Some(tab) = browser.tab(tab_id) else {
+                return;
+            };
+            (tab.url.clone(), browser.credentials_for_url(&tab.url))
+        };
+        let Some(credential) = credentials.last() else {
+            return;
+        };
+        let key = format!(
+            "{}:{}:{}:{}",
+            tab_id, url, credential.username, credential.updated_at
+        );
+        if self.last_autofill_keys.get(&tab_id) == Some(&key) {
+            return;
+        }
+        if let Some(webview) = self.webviews.get(&tab_id) {
+            let script = password_autofill_script(&credential.username, &credential.password);
+            if webview.evaluate_script(&script).is_ok() {
+                self.last_autofill_keys.insert(tab_id, key);
+            }
         }
     }
 
@@ -1056,6 +1133,82 @@ fn js_string(text: &str) -> String {
     }
     out.push('"');
     out
+}
+
+fn password_capture_script() -> &'static str {
+    r#"
+(function () {
+  if (window.__oxiPasswordCaptureInstalled) return;
+  window.__oxiPasswordCaptureInstalled = true;
+  function bestUsername(form, passwordInput) {
+    var inputs = Array.prototype.slice.call(form.querySelectorAll('input'));
+    var candidates = inputs.filter(function (input) {
+      var type = (input.getAttribute('type') || 'text').toLowerCase();
+      return input !== passwordInput && (type === 'text' || type === 'email' || type === 'tel' || type === 'username' || type === '');
+    });
+    var beforePassword = candidates.filter(function (input) {
+      return inputs.indexOf(input) < inputs.indexOf(passwordInput);
+    });
+    var selected = beforePassword.pop() || candidates[0];
+    return selected ? selected.value : '';
+  }
+  document.addEventListener('submit', function (event) {
+    var form = event.target;
+    if (!form || !form.querySelector) return;
+    var passwordInput = form.querySelector('input[type="password"]');
+    if (!passwordInput || !passwordInput.value) return;
+    var username = bestUsername(form, passwordInput);
+    if (!username) return;
+    try {
+      window.ipc.postMessage(JSON.stringify({
+        kind: 'password-submit',
+        url: window.location.href,
+        username: username,
+        password: passwordInput.value
+      }));
+    } catch (_) {}
+  }, true);
+})();
+"#
+}
+
+fn password_autofill_script(username: &str, password: &str) -> String {
+    format!(
+        r#"
+(function () {{
+  var username = {username};
+  var password = {password};
+  function fill() {{
+    var passwordInput = document.querySelector('input[type="password"]');
+    if (!passwordInput || passwordInput.value) return;
+    var inputs = Array.prototype.slice.call(document.querySelectorAll('input'));
+    var candidates = inputs.filter(function (input) {{
+      var type = (input.getAttribute('type') || 'text').toLowerCase();
+      return input !== passwordInput && (type === 'text' || type === 'email' || type === 'tel' || type === 'username' || type === '');
+    }});
+    var beforePassword = candidates.filter(function (input) {{
+      return inputs.indexOf(input) < inputs.indexOf(passwordInput);
+    }});
+    var userInput = beforePassword.pop() || candidates[0];
+    if (userInput && !userInput.value) {{
+      userInput.value = username;
+      userInput.dispatchEvent(new Event('input', {{ bubbles: true }}));
+      userInput.dispatchEvent(new Event('change', {{ bubbles: true }}));
+    }}
+    passwordInput.value = password;
+    passwordInput.dispatchEvent(new Event('input', {{ bubbles: true }}));
+    passwordInput.dispatchEvent(new Event('change', {{ bubbles: true }}));
+  }}
+  if (document.readyState === 'loading') {{
+    document.addEventListener('DOMContentLoaded', fill, {{ once: true }});
+  }} else {{
+    fill();
+  }}
+}})();
+"#,
+        username = js_string(username),
+        password = js_string(password)
+    )
 }
 
 /// Hit test for chrome UI elements

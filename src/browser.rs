@@ -26,12 +26,19 @@ pub enum NavigationTarget {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Tab {
     pub id: u32,
+    #[serde(default)]
     pub title: String,
+    #[serde(default)]
     pub url: String,
+    #[serde(default)]
     pub history: Vec<String>,
+    #[serde(default)]
     pub history_pos: usize,
+    #[serde(default = "default_zoom_percent")]
     pub zoom_percent: u16,
+    #[serde(default)]
     pub loading: bool,
+    #[serde(default)]
     pub incognito: bool,
 }
 
@@ -137,10 +144,17 @@ impl ProfileStore {
     }
 
     pub fn load_from_path(path: PathBuf) -> Self {
-        let data = std::fs::read_to_string(&path)
-            .ok()
-            .and_then(|text| serde_json::from_str::<ProfileData>(&text).ok())
-            .unwrap_or_default();
+        let data = match std::fs::read_to_string(&path) {
+            Ok(text) => match serde_json::from_str::<ProfileData>(&text) {
+                Ok(data) => data,
+                Err(_) => {
+                    let backup = path.with_extension(format!("json.bad-{}", now_secs()));
+                    let _ = std::fs::rename(&path, backup);
+                    ProfileData::default()
+                }
+            },
+            Err(_) => ProfileData::default(),
+        };
         Self { path, data }
     }
 
@@ -203,6 +217,10 @@ pub fn nearest_zoom_preset(value: u16) -> u16 {
         .copied()
         .min_by_key(|preset| preset.abs_diff(value))
         .unwrap_or(DEFAULT_ZOOM_PERCENT)
+}
+
+fn default_zoom_percent() -> u16 {
+    DEFAULT_ZOOM_PERCENT
 }
 
 /// Browser ana durumu
@@ -834,23 +852,17 @@ impl Browser {
             }
         }
         for history in imported.history {
-            if !self
-                .profile
-                .data
-                .history
-                .iter()
-                .any(|existing| existing.url == history.url && existing.visited_at == history.visited_at)
-            {
+            if !self.profile.data.history.iter().any(|existing| {
+                existing.url == history.url && existing.visited_at == history.visited_at
+            }) {
                 self.profile.data.history.push(history);
             }
         }
         for password in imported.passwords {
-            if let Some(existing) = self
-                .profile
-                .data
-                .passwords
-                .iter_mut()
-                .find(|item| item.origin == password.origin && item.username == password.username)
+            if let Some(existing) =
+                self.profile.data.passwords.iter_mut().find(|item| {
+                    item.origin == password.origin && item.username == password.username
+                })
             {
                 if password.updated_at >= existing.updated_at {
                     *existing = password;
@@ -1369,10 +1381,10 @@ impl Browser {
 <body>
     <div class="container">
         <h1>OxiBrowser</h1>
-        <p>%100 Rust ile yazılmış minimal web tarayıcısı.</p>
-        <div class="feature"><h3>Gezinme</h3><p>URL bar, geri/ileri, yenileme, sekme ve kaydırma akışı çalışır.</p></div>
-        <div class="feature"><h3>Sayfa motoru</h3><p>HTML parsing, CSS cascade, block layout ve tiny-skia render hattı yereldir.</p></div>
-        <div class="feature"><h3>Yerel dosyalar</h3><p><code>file://</code> URL'leri ve yerel HTML dosyaları açılabilir.</p></div>
+        <p>Rust shell ve native WebView motoru ile Chrome-benzeri web tarayıcısı.</p>
+        <div class="feature"><h3>Gezinme</h3><p>URL bar, geri/ileri, yenileme, sekme, zoom, history ve session restore çalışır.</p></div>
+        <div class="feature"><h3>Sayfa motoru</h3><p>Modern web, JavaScript, formlar, cookies ve medya desteği Wry native WebView üzerinden gelir.</p></div>
+        <div class="feature"><h3>Chrome araçları</h3><p><a href="about:bookmarks">Yer imleri</a>, <a href="about:downloads">indirilenler</a>, <a href="about:passwords">şifreler</a>, <a href="about:sync">sync</a>, <a href="about:extensions">uzantılar</a> ve <a href="about:devtools">DevTools</a>.</p></div>
         <p><a href="about:version">Sürüm bilgisi</a></p>
     </div>
 </body>
@@ -1439,11 +1451,19 @@ impl Browser {
 
     fn settings_html(&self) -> String {
         let settings = &self.profile.data.settings;
+        let sync_path = settings
+            .sync_snapshot_path
+            .clone()
+            .unwrap_or_else(default_sync_snapshot_path);
         let items = format!(
             r#"
             <li><strong>Ana sayfa</strong><small>{home}</small></li>
             <li><strong>Varsayılan arama</strong><small>{search}</small></li>
             <li><strong>Session restore</strong><small>{restore}</small></li>
+            <li><a href="about:passwords">Şifre yöneticisi</a><small>{password_count} kayıtlı giriş</small></li>
+            <li><a href="about:sync">Sync snapshot</a><small>{sync_path}</small></li>
+            <li><a href="about:extensions">Uzantılar</a><small>Chrome Web Store linki ve yerel uzantı klasörü</small></li>
+            <li><a href="about:devtools">DevTools</a><small>Cmd/Ctrl + Alt + I ile açılır</small></li>
             <li><strong>Profil dosyası</strong><small>{profile}</small></li>
             "#,
             home = Self::escape_html(&settings.home_url),
@@ -1453,9 +1473,100 @@ impl Browser {
             } else {
                 "Kapalı"
             },
+            password_count = self.profile.data.passwords.len(),
+            sync_path = Self::escape_html(&sync_path.display().to_string()),
             profile = Self::escape_html(&self.profile.path.display().to_string())
         );
         self.list_page_html("Ayarlar", "Temel browser ayarları", &items)
+    }
+
+    fn passwords_html(&self) -> String {
+        let mut items = String::new();
+        for credential in self.profile.data.passwords.iter().rev() {
+            let masked = "•".repeat(credential.password.chars().count().clamp(8, 24));
+            items.push_str(&format!(
+                r#"<li><strong>{origin}</strong><small>{username} · {masked}</small></li>"#,
+                origin = Self::escape_html(&credential.origin),
+                username = Self::escape_html(&credential.username),
+                masked = masked
+            ));
+        }
+        if items.is_empty() {
+            items.push_str("<li>Henüz kayıtlı şifre yok. Bir web formunda giriş yaptığında OxiBrowser yerel kasaya kaydeder.</li>");
+        }
+        items.push_str(
+            r#"<li><a href="about:clear-passwords">Tüm kayıtlı şifreleri temizle</a><small>Bu işlem yerel profil JSON kasasını boşaltır.</small></li>"#,
+        );
+        self.list_page_html(
+            "Şifreler",
+            "Yerel profil kasasına kaydedilen giriş bilgileri",
+            &items,
+        )
+    }
+
+    fn sync_html(&self) -> String {
+        let path = self
+            .profile
+            .data
+            .settings
+            .sync_snapshot_path
+            .clone()
+            .unwrap_or_else(default_sync_snapshot_path);
+        let items = format!(
+            r#"
+            <li><a href="about:sync-export">Snapshot dışa aktar</a><small>{path}</small></li>
+            <li><a href="about:sync-import">Snapshot içe aktar</a><small>Yer imleri, geçmiş, şifreler, uzantı kayıtları ve session verisi birleştirilir.</small></li>
+            <li><strong>Durum</strong><small>{status}</small></li>
+            "#,
+            path = Self::escape_html(&path.display().to_string()),
+            status = Self::escape_html(&self.status_message)
+        );
+        self.list_page_html(
+            "Sync",
+            "Google hesabı yerine taşınabilir yerel JSON snapshot senkronu",
+            &items,
+        )
+    }
+
+    fn extensions_html(&self) -> String {
+        let mut items = String::new();
+        items.push_str(&format!(
+            r#"<li><a href="{store}">Chrome Web Store'u aç</a><small>Wry WebView Chrome Web Store uzantı kurulumunu macOS'ta doğrudan desteklemez; mağaza sayfası normal web sayfası olarak açılır.</small></li>"#,
+            store = Self::escape_html(&self.profile.data.settings.extension_store_url)
+        ));
+        for extension in &self.profile.data.extensions {
+            let state = if extension.enabled {
+                "Etkin"
+            } else {
+                "Kapalı"
+            };
+            items.push_str(&format!(
+                r#"<li><strong>{name}</strong><small>{state} · {path}</small></li>"#,
+                name = Self::escape_html(&extension.name),
+                state = state,
+                path = Self::escape_html(&extension.path.display().to_string())
+            ));
+        }
+        if self.profile.data.extensions.is_empty() {
+            items.push_str("<li>Yerel unpacked uzantı kaydı yok.</li>");
+        }
+        self.list_page_html(
+            "Uzantılar",
+            "Chrome Web Store erişimi ve WebView'in izin verdiği yerel uzantı yönetimi",
+            &items,
+        )
+    }
+
+    fn devtools_html(&self) -> String {
+        let items = r#"
+            <li><strong>DevTools kısayolu</strong><small>Cmd/Ctrl + Alt + I aktif sekmenin WebView DevTools penceresini açar.</small></li>
+            <li><strong>Motor</strong><small>macOS'ta WKWebView inspector, Windows'ta WebView2 DevTools, Linux'ta WebKitGTK inspector kullanılır.</small></li>
+        "#;
+        self.list_page_html(
+            "DevTools",
+            "Native WebView motorunun geliştirici araçları",
+            items,
+        )
     }
 
     fn list_page_html(&self, title: &str, subtitle: &str, items: &str) -> String {
@@ -1508,7 +1619,7 @@ impl Browser {
 <body>
     <div class="box">
         <h1>OxiBrowser {}</h1>
-        <p>Rust, winit, softbuffer ve tiny-skia ile çalışan MVP tarayıcı.</p>
+        <p>Rust, winit, softbuffer, tiny-skia shell ve Wry native WebView ile çalışan Chrome-benzeri tarayıcı.</p>
         <p><a href="about:welcome">Başlangıç sayfasına dön</a></p>
     </div>
 </body>
@@ -1749,6 +1860,74 @@ mod tests {
         assert_eq!(browser.active_tab_id(), Some(8));
         assert_eq!(browser.current_url, "https://two.example");
         assert_eq!(browser.next_tab_id, 9);
+    }
+
+    #[test]
+    fn password_manager_dedupes_by_origin_and_username() {
+        let mut browser = Browser::new();
+        browser.profile = temp_profile_store("password_manager");
+
+        assert!(browser.save_password_for_url(
+            "https://example.com/login",
+            "kutay@example.com",
+            "one"
+        ));
+        assert!(browser.save_password_for_url(
+            "https://example.com/account",
+            "kutay@example.com",
+            "two"
+        ));
+
+        let credentials = browser.credentials_for_url("https://example.com/dashboard");
+        assert_eq!(credentials.len(), 1);
+        assert_eq!(credentials[0].origin, "https://example.com");
+        assert_eq!(credentials[0].password, "two");
+        assert!(browser
+            .credentials_for_url("https://other.example")
+            .is_empty());
+    }
+
+    #[test]
+    fn sync_snapshot_round_trips_profile_data() {
+        let sync_path = temp_profile_path("sync_snapshot");
+        let mut source = Browser::new();
+        source.profile = temp_profile_store("sync_source");
+        source.profile.data.settings.sync_snapshot_path = Some(sync_path.clone());
+        source.profile.data.bookmarks.push(Bookmark {
+            title: "Example".to_string(),
+            url: "https://example.com".to_string(),
+            created_at: 1,
+        });
+        source.save_password_for_url("https://example.com/login", "user", "secret");
+
+        source.export_sync_snapshot().unwrap();
+
+        let mut target = Browser::new();
+        target.profile = temp_profile_store("sync_target");
+        target.profile.data.settings.sync_snapshot_path = Some(sync_path);
+        target.import_sync_snapshot().unwrap();
+
+        assert_eq!(target.profile.data.bookmarks.len(), 1);
+        assert_eq!(target.credentials_for_url("https://example.com").len(), 1);
+    }
+
+    #[test]
+    fn chrome_tools_about_pages_are_available() {
+        let browser = Browser::new();
+
+        for url in [
+            "about:passwords",
+            "about:sync",
+            "about:extensions",
+            "about:devtools",
+        ] {
+            match browser.navigation_target_for_url(url) {
+                NavigationTarget::Html { html, .. } => {
+                    assert!(html.contains("<html>") || html.contains("<!DOCTYPE html>"));
+                }
+                NavigationTarget::Url(_) => panic!("{url} should be an internal page"),
+            }
+        }
     }
 
     fn temp_profile_store(name: &str) -> ProfileStore {
