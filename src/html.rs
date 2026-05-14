@@ -87,7 +87,7 @@ impl<'a> SimpleHtmlParser<'a> {
                 // Metin
                 let text = self.parse_text();
                 if !text.trim().is_empty() {
-                    body.children.push(Node::text(&text));
+                    body.append_child_owned(Node::text(&text));
                 }
             }
         }
@@ -196,7 +196,7 @@ impl<'a> SimpleHtmlParser<'a> {
             }
             let text = self.parse_text();
             if !text.is_empty() {
-                node.children.push(Node::text(&text));
+                node.append_child_owned(Node::text(&text));
             }
         }
 
@@ -278,7 +278,7 @@ impl<'a> SimpleHtmlParser<'a> {
             text.push(c);
             self.advance();
         }
-        text
+        decode_html_entities(&text)
     }
 }
 
@@ -333,6 +333,31 @@ fn decode_html_entities(s: &str) -> String {
     }
 
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::dom::NodeType;
+
+    #[test]
+    fn decodes_entities_in_text_nodes() {
+        let dom = parse_html_simple("<p>Tom &amp; Jerry &lt;3</p>");
+        assert!(dom.text_content().contains("Tom & Jerry <3"));
+    }
+
+    #[test]
+    fn assigns_parent_to_text_nodes() {
+        let dom = parse_html_simple("<a href=\"/x\">Docs</a>");
+        let body = dom.elements_by_tag("body")[0];
+        let anchor = body.elements_by_tag("a")[0];
+        let text = anchor
+            .children
+            .iter()
+            .find(|child| matches!(child.node_type, NodeType::Text(_)))
+            .unwrap();
+        assert_eq!(text.parent, Some(anchor.id));
+    }
 }
 
 /// DOM'u hiyerarşik yazdır (debug)

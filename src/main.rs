@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 /// OxiBrowser - %100 Rust web tarayıcısı
 ///
 /// # Mimarisi
@@ -7,7 +9,7 @@
 /// - Render engine: tiny-skia ile 2D çizim
 /// - Networking: reqwest + rustls
 /// - Window: winit + softbuffer
-/// - JavaScript: boa_engine (temel destek)
+/// - JavaScript: placeholder (MVP'de devre dışı)
 ///
 /// # %100 Rust
 /// Hiçbir C/C++ kütüphanesi kullanılmamıştır.
@@ -51,81 +53,7 @@ fn main() {
         log::info!("URL yükleniyor: {}", url);
         browser.load_url_sync(url);
     } else {
-        // Demo sayfa yükle
-        let demo_html = r#"
-<!DOCTYPE html>
-<html>
-<head>
-    <title>OxiBrowser</title>
-    <style>
-        body {
-            font-family: Helvetica, Arial, sans-serif;
-            margin: 30px;
-            background-color: #f5f5f5;
-        }
-        h1 {
-            color: #e67e22;
-            text-align: center;
-            font-size: 36px;
-        }
-        .container {
-            max-width: 700px;
-            margin: 0 auto;
-            background: white;
-            padding: 30px;
-            border-radius: 10px;
-            border: 1px solid #ddd;
-        }
-        p {
-            font-size: 16px;
-            line-height: 1.6;
-            color: #333;
-        }
-        .feature {
-            background: #fef9e7;
-            padding: 10px 15px;
-            margin: 10px 0;
-            border-left: 4px solid #e67e22;
-        }
-        .feature h3 {
-            margin: 0 0 5px 0;
-            color: #e67e22;
-        }
-    </style>
-</head>
-<body>
-    <div class="container">
-        <h1>🔥 OxiBrowser</h1>
-        <p>%100 Rust ile yazılmış web tarayıcısına hoş geldiniz!</p>
-
-        <div class="feature">
-            <h3>🦀 HTML & CSS</h3>
-            <p>Kendi HTML parser ve CSS motorumuz ile çalışır.</p>
-        </div>
-
-        <div class="feature">
-            <h3>📐 Layout Engine</h3>
-            <p>Block ve inline layout desteği ile sayfaları düzenler.</p>
-        </div>
-
-        <div class="feature">
-            <h3>🎨 Render</h3>
-            <p>tiny-skia ile GPU benzeri 2D çizim.</p>
-        </div>
-
-        <div class="feature">
-            <h3>⚡ JavaScript</h3>
-            <p>boa_engine ile JS desteği.</p>
-        </div>
-
-        <p style="text-align: center; margin-top: 20px; color: #999;">
-            OxiBrowser v0.1.0
-        </p>
-    </div>
-</body>
-</html>
-        "#;
-        browser.parse_and_render(demo_html, "about:welcome");
+        browser.load_welcome_page();
     }
 
     // UI'ı başlat
