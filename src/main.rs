@@ -1,4 +1,5 @@
 #![allow(dead_code)]
+#![cfg_attr(target_os = "ios", allow(unused_imports))]
 
 /// OxiBrowser - Rust shell + native WebView web tarayıcısı
 ///
@@ -12,9 +13,11 @@ mod browser;
 mod css;
 mod dom;
 mod html;
+pub mod icons;
 mod js;
 mod layout;
 mod net;
+mod platform;
 mod render;
 mod style;
 mod types;
@@ -22,10 +25,29 @@ mod ui;
 mod url_bar;
 
 use browser::Browser;
+
+#[cfg(not(target_os = "ios"))]
 use ui::BrowserUI;
 
+#[cfg(target_os = "macos")]
+fn setup_macos_app() {
+    platform::init_platform();
+    platform::macos::setup_application_menu();
+}
+
+#[cfg(not(target_os = "macos"))]
+fn setup_macos_app() {}
+
+#[cfg(target_os = "ios")]
 fn main() {
-    // Logger başlat
+    // iOS: This entry point is for reference only.
+    // iOS builds use a separate UIKit-based entry via wry.
+    // Build with: cargo build --target aarch64-apple-ios --features ios-app
+    println!("OxiBrowser iOS - build with Xcode or cargo-xcode");
+}
+
+#[cfg(not(target_os = "ios"))]
+fn main() {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
 
     log::info!("OxiBrowser başlatılıyor...");
@@ -34,10 +56,10 @@ fn main() {
         std::env::var("CARGO_PKG_RUST_VERSION").unwrap_or_else(|_| "bilinmiyor".to_string())
     );
 
-    // Browser oluştur
+    setup_macos_app();
+
     let mut browser = Browser::new();
 
-    // Varsa komut satırı argümanından URL al
     let args: Vec<String> = std::env::args().collect();
     let startup_url = args.get(1).map(|url| {
         log::info!("URL yükleniyor: {}", url);
@@ -49,7 +71,6 @@ fn main() {
         browser.new_tab("");
     }
 
-    // UI'ı başlat
     log::info!("UI başlatılıyor...");
 
     let mut browser_ui = BrowserUI::new(browser);

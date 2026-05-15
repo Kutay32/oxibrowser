@@ -88,6 +88,33 @@ pub struct ExtensionItem {
     pub installed_at: u64,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CookieItem {
+    pub name: String,
+    pub value: String,
+    pub domain: String,
+    pub path: String,
+    pub created_at: u64,
+    pub expires_at: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UserProfile {
+    pub display_name: String,
+    pub avatar_color: u32,
+    pub created_at: u64,
+}
+
+impl Default for UserProfile {
+    fn default() -> Self {
+        Self {
+            display_name: "Kullanıcı".to_string(),
+            avatar_color: 0x4285F4,
+            created_at: now_secs(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BrowserSettings {
     pub default_search_url: String,
@@ -97,6 +124,8 @@ pub struct BrowserSettings {
     pub sync_snapshot_path: Option<PathBuf>,
     #[serde(default = "default_extension_store_url")]
     pub extension_store_url: String,
+    #[serde(default)]
+    pub user_profile: Option<UserProfile>,
 }
 
 impl Default for BrowserSettings {
@@ -107,6 +136,7 @@ impl Default for BrowserSettings {
             home_url: "about:welcome".to_string(),
             sync_snapshot_path: None,
             extension_store_url: default_extension_store_url(),
+            user_profile: None,
         }
     }
 }
@@ -123,6 +153,8 @@ pub struct ProfileData {
     pub downloads: Vec<DownloadItem>,
     #[serde(default)]
     pub passwords: Vec<PasswordCredential>,
+    #[serde(default)]
+    pub cookies: Vec<CookieItem>,
     #[serde(default)]
     pub extensions: Vec<ExtensionItem>,
     #[serde(default)]
@@ -204,9 +236,13 @@ fn title_for_url(url: &str) -> String {
         "about:bookmarks" => "Yer İmleri".to_string(),
         "about:settings" => "Ayarlar".to_string(),
         "about:passwords" => "Şifreler".to_string(),
+        "about:cookies" => "Cookie'ler".to_string(),
         "about:sync" => "Sync".to_string(),
         "about:extensions" => "Uzantılar".to_string(),
         "about:devtools" => "DevTools".to_string(),
+        "about:profile" => "Profil".to_string(),
+        "about:search-engines" => "Arama Motorları".to_string(),
+        "about:import-bookmarks" => "İçe Aktar".to_string(),
         _ => url.to_string(),
     }
 }
@@ -278,6 +314,11 @@ impl Browser {
 
     /// Yeni sekme aç
     pub fn new_tab(&mut self, url: &str) -> u32 {
+        self.new_tab_with_options(url, false)
+    }
+
+    /// Yeni sekme aç (incognito seçeneği ile)
+    pub fn new_tab_with_options(&mut self, url: &str, incognito: bool) -> u32 {
         let id = self.next_tab_id;
         self.next_tab_id += 1;
         let initial_url = if url.trim().is_empty() {
@@ -289,7 +330,11 @@ impl Browser {
         let tab = Tab {
             id,
             title: if initial_url == "about:welcome" {
-                "Yeni Sekme".to_string()
+                if incognito {
+                    "Gizli Sekme".to_string()
+                } else {
+                    "Yeni Sekme".to_string()
+                }
             } else {
                 initial_url.clone()
             },
@@ -298,12 +343,16 @@ impl Browser {
             history_pos: 0,
             zoom_percent: DEFAULT_ZOOM_PERCENT,
             loading: false,
-            incognito: false,
+            incognito,
         };
 
         self.tabs.push(tab);
         self.active_tab = self.tabs.len() - 1;
         id
+    }
+
+    pub fn new_incognito_tab(&mut self, url: &str) -> u32 {
+        self.new_tab_with_options(url, true)
     }
 
     /// Yeni sekme aç ve içeriğini hazırla.
@@ -430,6 +479,88 @@ impl Browser {
             return NavigationTarget::Html {
                 html: self.about_page_html("about:passwords"),
                 url: "about:passwords".to_string(),
+            };
+        }
+
+        if url == "about:clear-cookies" {
+            self.clear_cookies();
+            self.current_url = "about:cookies".to_string();
+            self.url_bar_text = self.current_url.clone();
+            self.url_bar_focused = false;
+            self.url_bar_select_all = false;
+            self.find_bar_active = false;
+            if let Some(tab) = self.active_tab_mut() {
+                tab.loading = false;
+                tab.url = "about:cookies".to_string();
+                tab.title = title_for_url("about:cookies");
+            }
+            self.persist_session();
+            return NavigationTarget::Html {
+                html: self.about_page_html("about:cookies"),
+                url: "about:cookies".to_string(),
+            };
+        }
+
+        if url.starts_with("about:set-search-") {
+            let engine = url.trim_start_matches("about:set-search-");
+            self.set_default_search_engine(engine);
+            self.current_url = "about:search-engines".to_string();
+            self.url_bar_text = self.current_url.clone();
+            self.url_bar_focused = false;
+            self.url_bar_select_all = false;
+            self.find_bar_active = false;
+            if let Some(tab) = self.active_tab_mut() {
+                tab.loading = false;
+                tab.url = "about:search-engines".to_string();
+                tab.title = title_for_url("about:search-engines");
+            }
+            self.persist_session();
+            return NavigationTarget::Html {
+                html: self.about_page_html("about:search-engines"),
+                url: "about:search-engines".to_string(),
+            };
+        }
+
+        if url.starts_with("about:set-avatar-") {
+            let color_str = url.trim_start_matches("about:set-avatar-");
+            let avatar_color = u32::from_str_radix(color_str, 16).unwrap_or(0x4285F4);
+            let current_name = self.user_profile().display_name.clone();
+            self.update_user_profile(&current_name, avatar_color);
+            self.current_url = "about:profile".to_string();
+            self.url_bar_text = self.current_url.clone();
+            self.url_bar_focused = false;
+            self.url_bar_select_all = false;
+            self.find_bar_active = false;
+            if let Some(tab) = self.active_tab_mut() {
+                tab.loading = false;
+                tab.url = "about:profile".to_string();
+                tab.title = title_for_url("about:profile");
+            }
+            self.persist_session();
+            return NavigationTarget::Html {
+                html: self.about_page_html("about:profile"),
+                url: "about:profile".to_string(),
+            };
+        }
+
+        if url.starts_with("about:set-name-") {
+            let name = url.trim_start_matches("about:set-name-");
+            let current_color = self.user_profile().avatar_color;
+            self.update_user_profile(name, current_color);
+            self.current_url = "about:profile".to_string();
+            self.url_bar_text = self.current_url.clone();
+            self.url_bar_focused = false;
+            self.url_bar_select_all = false;
+            self.find_bar_active = false;
+            if let Some(tab) = self.active_tab_mut() {
+                tab.loading = false;
+                tab.url = "about:profile".to_string();
+                tab.title = title_for_url("about:profile");
+            }
+            self.persist_session();
+            return NavigationTarget::Html {
+                html: self.about_page_html("about:profile"),
+                url: "about:profile".to_string(),
             };
         }
 
@@ -682,11 +813,96 @@ impl Browser {
     pub fn clear_browsing_data(&mut self) {
         self.profile.data.history.clear();
         self.profile.data.downloads.clear();
-        self.status_message = "Geçmiş ve indirme kayıtları temizlendi".to_string();
+        self.profile.data.cookies.clear();
+        self.status_message = "Geçmiş, indirme ve cookie kayıtları temizlendi".to_string();
+        let _ = self.profile.save();
+    }
+
+    pub fn add_cookie(&mut self, name: &str, value: &str, domain: &str, path: &str, expires: Option<u64>) {
+        // Remove existing cookie with same name/domain/path
+        self.profile.data.cookies.retain(|c| {
+            !(c.name == name && c.domain == domain && c.path == path)
+        });
+        self.profile.data.cookies.push(CookieItem {
+            name: name.to_string(),
+            value: value.to_string(),
+            domain: domain.to_string(),
+            path: path.to_string(),
+            created_at: now_secs(),
+            expires_at: expires,
+        });
+        let _ = self.profile.save();
+    }
+
+    pub fn cookies_for_domain(&self, domain: &str) -> Vec<&CookieItem> {
+        let now = now_secs();
+        self.profile.data.cookies
+            .iter()
+            .filter(|c| {
+                c.domain == domain || domain.ends_with(&c.domain)
+            })
+            .filter(|c| {
+                c.expires_at.map(|exp| exp > now).unwrap_or(true)
+            })
+            .collect()
+    }
+
+    pub fn clear_cookies(&mut self) {
+        self.profile.data.cookies.clear();
+        self.status_message = "Cookie'ler temizlendi".to_string();
+        let _ = self.profile.save();
+    }
+
+    pub fn expired_cookies_cleanup(&mut self) {
+        let now = now_secs();
+        self.profile.data.cookies.retain(|c| {
+            c.expires_at.map(|exp| exp > now).unwrap_or(true)
+        });
+        let _ = self.profile.save();
+    }
+
+    pub fn user_profile(&self) -> &UserProfile {
+        self.profile.data.settings.user_profile.as_ref().unwrap_or_else(|| {
+            // Return a temporary default if not set
+            static DEFAULT: std::sync::OnceLock<UserProfile> = std::sync::OnceLock::new();
+            DEFAULT.get_or_init(UserProfile::default)
+        })
+    }
+
+    pub fn update_user_profile(&mut self, display_name: &str, avatar_color: u32) {
+        self.profile.data.settings.user_profile = Some(UserProfile {
+            display_name: display_name.to_string(),
+            avatar_color,
+            created_at: self.profile.data.settings.user_profile
+                .as_ref()
+                .map(|p| p.created_at)
+                .unwrap_or_else(now_secs),
+        });
+        self.status_message = format!("Profil güncellendi: {}", display_name);
+        let _ = self.profile.save();
+    }
+
+    pub fn set_default_search_engine(&mut self, engine: &str) {
+        let url = match engine {
+            "google" => "https://www.google.com/search?q={query}",
+            "bing" => "https://www.bing.com/search?q={query}",
+            "duckduckgo" => "https://duckduckgo.com/?q={query}",
+            "yahoo" => "https://search.yahoo.com/search?p={query}",
+            _ => "https://www.google.com/search?q={query}",
+        };
+        self.profile.data.settings.default_search_url = url.to_string();
+        self.status_message = format!("Arama motoru: {}", engine);
         let _ = self.profile.save();
     }
 
     pub fn save_password_for_url(&mut self, url: &str, username: &str, password: &str) -> bool {
+        // Don't save passwords in incognito mode
+        if let Some(tab) = self.active_tab() {
+            if tab.incognito {
+                return false;
+            }
+        }
+
         let Some(origin) = Self::origin_for_url(url) else {
             return false;
         };
@@ -812,6 +1028,14 @@ impl Browser {
         if url.trim().is_empty() {
             return;
         }
+
+        // Don't save history for incognito tabs
+        if let Some(tab) = self.active_tab() {
+            if tab.incognito {
+                return;
+            }
+        }
+
         if self
             .profile
             .data
@@ -899,10 +1123,14 @@ impl Browser {
             "about:bookmarks" => self.bookmarks_html(),
             "about:settings" => self.settings_html(),
             "about:passwords" => self.passwords_html(),
+            "about:cookies" => self.cookies_html(),
             "about:sync" => self.sync_html(),
             "about:extensions" => self.extensions_html(),
             "about:devtools" => self.devtools_html(),
             "about:welcome" => self.welcome_html(),
+            "about:profile" => self.profile_html(),
+            "about:search-engines" => self.search_engines_html(),
+            "about:import-bookmarks" => self.import_bookmarks_html(),
             _ => self.error_page_html("Bilinmeyen about sayfası", url, "Bu iç sayfa bulunamadı."),
         }
     }
@@ -1376,6 +1604,7 @@ impl Browser {
         .feature { margin: 12px 0; padding: 12px 14px; border-left: 4px solid #0f766e; background: #f0fdfa; }
         .feature h3 { margin: 0 0 5px 0; color: #115e59; font-size: 17px; }
         code { color: #7c2d12; }
+        .shortcut { display: inline-block; background: #f1f3f4; padding: 2px 8px; border-radius: 4px; font-size: 13px; font-family: monospace; }
     </style>
 </head>
 <body>
@@ -1384,8 +1613,9 @@ impl Browser {
         <p>Rust shell ve native WebView motoru ile Chrome-benzeri web tarayıcısı.</p>
         <div class="feature"><h3>Gezinme</h3><p>URL bar, geri/ileri, yenileme, sekme, zoom, history ve session restore çalışır.</p></div>
         <div class="feature"><h3>Sayfa motoru</h3><p>Modern web, JavaScript, formlar, cookies ve medya desteği Wry native WebView üzerinden gelir.</p></div>
+        <div class="feature"><h3>Gizli Mod</h3><p><span class="shortcut">Cmd/Ctrl + Shift + N</span> ile gizli sekme açın. Gizli sekmelerde geçmiş ve şifre kaydedilmez.</p></div>
         <div class="feature"><h3>Chrome araçları</h3><p><a href="about:bookmarks">Yer imleri</a>, <a href="about:downloads">indirilenler</a>, <a href="about:passwords">şifreler</a>, <a href="about:sync">sync</a>, <a href="about:extensions">uzantılar</a> ve <a href="about:devtools">DevTools</a>.</p></div>
-        <p><a href="about:version">Sürüm bilgisi</a></p>
+        <p><a href="about:version">Sürüm bilgisi</a> · <a href="about:settings">Ayarlar</a></p>
     </div>
 </body>
 </html>
@@ -1455,17 +1685,27 @@ impl Browser {
             .sync_snapshot_path
             .clone()
             .unwrap_or_else(default_sync_snapshot_path);
+        let profile = self.user_profile();
+        let avatar_color = format!("#{:06X}", profile.avatar_color);
         let items = format!(
             r#"
+            <li><strong>Kullanıcı</strong><small><span style="display:inline-block;width:16px;height:16px;border-radius:50%;background:{avatar_color};vertical-align:middle;margin-right:6px;"></span>{name}</small></li>
+            <li><a href="about:profile">Profil ayarları</a><small>İsim ve avatar rengini değiştir</small></li>
             <li><strong>Ana sayfa</strong><small>{home}</small></li>
-            <li><strong>Varsayılan arama</strong><small>{search}</small></li>
+            <li><strong>Arama motoru</strong><small>{search}</small></li>
+            <li><a href="about:search-engines">Arama motorunu değiştir</a><small>Google, Bing, DuckDuckGo, Yahoo</small></li>
             <li><strong>Session restore</strong><small>{restore}</small></li>
+            <li><a href="about:bookmarks">Yer imleri</a><small>{bookmark_count} kayıtlı yer imi</small></li>
+            <li><a href="about:import-bookmarks">Chrome'dan yer imi içe aktar</a><small>Chrome bookmark JSON dosyasını yükle</small></li>
             <li><a href="about:passwords">Şifre yöneticisi</a><small>{password_count} kayıtlı giriş</small></li>
+            <li><a href="about:cookies">Cookie yönetimi</a><small>{cookie_count} kayıtlı cookie</small></li>
             <li><a href="about:sync">Sync snapshot</a><small>{sync_path}</small></li>
             <li><a href="about:extensions">Uzantılar</a><small>Chrome Web Store linki ve yerel uzantı klasörü</small></li>
             <li><a href="about:devtools">DevTools</a><small>Cmd/Ctrl + Alt + I ile açılır</small></li>
             <li><strong>Profil dosyası</strong><small>{profile}</small></li>
             "#,
+            name = Self::escape_html(&profile.display_name),
+            avatar_color = avatar_color,
             home = Self::escape_html(&settings.home_url),
             search = Self::escape_html(&settings.default_search_url),
             restore = if settings.restore_session {
@@ -1473,11 +1713,13 @@ impl Browser {
             } else {
                 "Kapalı"
             },
+            bookmark_count = self.profile.data.bookmarks.len(),
             password_count = self.profile.data.passwords.len(),
+            cookie_count = self.profile.data.cookies.len(),
             sync_path = Self::escape_html(&sync_path.display().to_string()),
             profile = Self::escape_html(&self.profile.path.display().to_string())
         );
-        self.list_page_html("Ayarlar", "Temel browser ayarları", &items)
+        self.list_page_html("Ayarlar", "Browser ve profil ayarları", &items)
     }
 
     fn passwords_html(&self) -> String {
@@ -1500,6 +1742,40 @@ impl Browser {
         self.list_page_html(
             "Şifreler",
             "Yerel profil kasasına kaydedilen giriş bilgileri",
+            &items,
+        )
+    }
+
+    fn cookies_html(&self) -> String {
+        let mut items = String::new();
+        for cookie in self.profile.data.cookies.iter().rev().take(200) {
+            let expires = cookie
+                .expires_at
+                .map(|exp| {
+                    if exp == 0 {
+                        "Oturum sonunda".to_string()
+                    } else {
+                        format!("Süre: {}sn", exp.saturating_sub(now_secs()))
+                    }
+                })
+                .unwrap_or("Kalıcı".to_string());
+            items.push_str(&format!(
+                r#"<li><strong>{name}</strong><small>{domain}{path} · {expires}</small></li>"#,
+                name = Self::escape_html(&cookie.name),
+                domain = Self::escape_html(&cookie.domain),
+                path = Self::escape_html(&cookie.path),
+                expires = expires
+            ));
+        }
+        if items.is_empty() {
+            items.push_str("<li>Henüz kayıtlı cookie yok. Web siteleri ziyaret edildiğinde cookie'ler yerel olarak saklanır.</li>");
+        }
+        items.push_str(
+            r#"<li><a href="about:clear-cookies">Tüm cookie'leri temizle</a><small>Bu işlem yerel cookie deposunu boşaltır.</small></li>"#,
+        );
+        self.list_page_html(
+            "Cookie'ler",
+            "Yerel olarak saklanan cookie bilgileri",
             &items,
         )
     }
@@ -1565,6 +1841,77 @@ impl Browser {
         self.list_page_html(
             "DevTools",
             "Native WebView motorunun geliştirici araçları",
+            items,
+        )
+    }
+
+    fn profile_html(&self) -> String {
+        let profile = self.user_profile();
+        let avatar_color = format!("#{:06X}", profile.avatar_color);
+        let colors = [
+            ("0x4285F4", "Mavi"), ("0xEA4335", "Kırmızı"), ("0xFBBC04", "Sarı"),
+            ("0x34A853", "Yeşil"), ("0x8E44AD", "Mor"), ("0xE67E22", "Turuncu"),
+            ("0x1ABC9C", "Turkuaz"), ("0xE91E63", "Pembe"), ("0x607D8B", "Gri"),
+        ];
+        let mut color_buttons = String::new();
+        for (color, name) in &colors {
+            let hex = format!("#{}", &color[2..]);
+            color_buttons.push_str(&format!(
+                r#"<a href="about:set-avatar-{}" style="display:inline-block;width:32px;height:32px;border-radius:50%;background:{};margin:4px;border:2px solid {};" title="{}"></a>"#,
+                color, hex, if *color == avatar_color { "#000" } else { "transparent" }, name
+            ));
+        }
+        let items = format!(
+            r#"
+            <li><strong>Mevcut profil</strong><small><span style="display:inline-block;width:24px;height:24px;border-radius:50%;background:{avatar_color};vertical-align:middle;margin-right:8px;"></span>{name}</small></li>
+            <li><strong>Avatar rengi seç</strong><small>{colors}</small></li>
+            <li><a href="about:set-name-Kullanıcı">Varsayılan isme dön</a><small>İsmi "Kullanıcı" olarak sıfırla</small></li>
+            "#,
+            name = Self::escape_html(&profile.display_name),
+            avatar_color = avatar_color,
+            colors = color_buttons
+        );
+        self.list_page_html(
+            "Profil",
+            "Kullanıcı profil ayarları",
+            &items,
+        )
+    }
+
+    fn search_engines_html(&self) -> String {
+        let current = &self.profile.data.settings.default_search_url;
+        let engines = [
+            ("google", "Google", "https://www.google.com"),
+            ("bing", "Bing", "https://www.bing.com"),
+            ("duckduckgo", "DuckDuckGo", "https://duckduckgo.com"),
+            ("yahoo", "Yahoo", "https://search.yahoo.com"),
+        ];
+        let mut items = String::new();
+        for (key, name, url) in &engines {
+            let is_active = current.contains(key);
+            let badge = if is_active { " ✓ Aktif" } else { "" };
+            items.push_str(&format!(
+                r#"<li><a href="about:set-search-{}">{}</a><small>{} {}</small></li>"#,
+                key, name, url, badge
+            ));
+        }
+        self.list_page_html(
+            "Arama Motorları",
+            "Varsayılan arama motorunu seçin",
+            &items,
+        )
+    }
+
+    fn import_bookmarks_html(&self) -> String {
+        let items = r#"
+            <li><strong>Chrome'dan içe aktarma</strong><small>Chrome'da Yer İmleri Yöneticisi'ni açın → Yer imlerini dışa aktar → HTML dosyasını kaydedin.</small></li>
+            <li><strong>Desteklenen format</strong><small>Chrome bookmark HTML dosyası (bookmarks_*.html)</small></li>
+            <li><a href="about:import-trigger">İçe aktarmayı başlat</a><small>Dosya seçici açılır (macOS Finder)</small></li>
+            <li><strong>Not</strong><small>OxiBrowser şu an için yerel JSON sync dosyasından da içe aktarabilir. about:sync-import sayfasını kullanın.</small></li>
+        "#;
+        self.list_page_html(
+            "Chrome'dan İçe Aktar",
+            "Chrome yer imlerini OxiBrowser'a aktarın",
             items,
         )
     }

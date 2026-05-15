@@ -1,5 +1,6 @@
 /// Browser UI - winit + softbuffer ile pencere yönetimi
 use crate::browser::{Browser, NavigationTarget, DEFAULT_ZOOM_PERCENT};
+use crate::icons;
 use crate::types::{Color, TextAlign};
 use serde::Deserialize;
 use softbuffer::Surface;
@@ -75,6 +76,11 @@ impl BrowserUI {
             scroll_animating: false,
             last_scroll_frame: None,
             needs_redraw: true,
+            hovered_tab_index: None,
+            hovered_toolbar_btn: None,
+            hovered_link_url: None,
+            window_width: 1024.0,
+            scale_factor: 1.0,
         };
 
         event_loop
@@ -101,6 +107,11 @@ struct BrowserApp {
     scroll_animating: bool,
     last_scroll_frame: Option<Instant>,
     needs_redraw: bool,
+    hovered_tab_index: Option<usize>,
+    hovered_toolbar_btn: Option<ChromeHit>,
+    hovered_link_url: Option<String>,
+    window_width: f32,
+    scale_factor: f64,
 }
 
 #[derive(Debug, Deserialize)]
@@ -124,6 +135,18 @@ struct ChromeSnapshot {
     tab_count: usize,
     zoom_percent: u16,
     bookmarked: bool,
+    tabs: Vec<TabInfo>,
+    active_tab_index: usize,
+    incognito: bool,
+    user_display_name: String,
+    user_avatar_color: u32,
+}
+
+#[derive(Clone)]
+struct TabInfo {
+    title: String,
+    loading: bool,
+    incognito: bool,
 }
 
 impl ApplicationHandler for BrowserApp {
@@ -134,7 +157,11 @@ impl ApplicationHandler for BrowserApp {
 
         let window_attrs = WindowAttributes::default()
             .with_title("OxiBrowser")
-            .with_inner_size(LogicalSize::new(1024.0, 768.0));
+            .with_inner_size(LogicalSize::new(1200.0, 800.0))
+            .with_position(winit::dpi::LogicalPosition::new(100.0, 50.0))
+            .with_visible(true)
+            .with_resizable(true)
+            .with_decorations(true);
 
         let window = event_loop
             .create_window(window_attrs)
@@ -153,6 +180,7 @@ impl ApplicationHandler for BrowserApp {
         self.window = Some(window.clone());
 
         let size = window.inner_size();
+        self.scale_factor = window.scale_factor();
         self.pixmap = Pixmap::new(size.width.max(1), size.height.max(1));
         if let Some(ref mut p) = self.pixmap {
             p.fill(tiny_skia::Color::WHITE);
@@ -195,18 +223,58 @@ impl ApplicationHandler for BrowserApp {
                 self.render();
             }
             WindowEvent::CursorMoved { position, .. } => {
+                let prev_hovered_tab = self.hovered_tab_index;
+                let prev_hovered_btn = self.hovered_toolbar_btn;
                 self.cursor_pos = position;
+                let logical_width = self
+                    .window
+                    .as_ref()
+                    .map(|w| w.inner_size().width)
+                    .unwrap_or(1024) as f32 / self.scale_factor as f32;
+                self.window_width = logical_width;
+
+                // Convert physical cursor position to logical coordinates
+                let logical_mx = self.cursor_pos.x as f32 / self.scale_factor as f32;
+                let logical_my = self.cursor_pos.y as f32 / self.scale_factor as f32;
+
+                // Update tab hover
+                let (tab_count, active_idx) = {
+                    let browser = self.ui.lock().unwrap();
+                    (browser.tabs.len(), browser.active_tab)
+                };
+                self.hovered_tab_index = hit_test_tab(
+                    logical_mx,
+                    logical_my,
+                    tab_count,
+                    active_idx,
+                    logical_width,
+                );
+
+                // Update toolbar button hover
+                let hit = hit_test(
+                    logical_mx,
+                    logical_my,
+                    logical_width,
+                );
+                self.hovered_toolbar_btn = hit;
+
+                if self.hovered_tab_index != prev_hovered_tab
+                    || self.hovered_toolbar_btn != prev_hovered_btn
+                {
+                    self.request_redraw();
+                }
             }
             WindowEvent::ModifiersChanged(modifiers) => {
                 self.modifiers = modifiers.state();
             }
             WindowEvent::MouseWheel { delta, .. } => {
-                if (self.cursor_pos.y as f32) >= CHROME_HEIGHT {
+                let logical_my = self.cursor_pos.y as f32 / self.scale_factor as f32;
+                if logical_my < CHROME_HEIGHT {
                     return;
                 }
                 let scroll_delta: f32 = match delta {
                     MouseScrollDelta::LineDelta(_, y) => y * 40.0,
-                    MouseScrollDelta::PixelDelta(pos) => pos.y as f32,
+                    MouseScrollDelta::PixelDelta(pos) => pos.y as f32 / self.scale_factor as f32,
                 };
                 self.smooth_scroll_by(-scroll_delta);
             }
@@ -266,15 +334,28 @@ impl ApplicationHandler for BrowserApp {
                             self.navigate_active("about:settings");
                         }
                         _ => {
-                            let page_click = (self.cursor_pos.y as f32) >= CHROME_HEIGHT;
-                            {
-                                let mut b = self.ui.lock().unwrap();
-                                if b.url_bar_focused {
-                                    b.blur_url_bar();
+                            // Check if clicking on a tab for switching
+                            if let Some(tab_idx) = self.hovered_tab_index {
+                                let tab_id = {
+                                    let browser = self.ui.lock().unwrap();
+                                    browser.tabs.get(tab_idx).map(|t| t.id)
+                                };
+                                if let Some(id) = tab_id {
+                                    self.switch_to_tab_by_id(id);
                                 }
-                            }
-                            if page_click {
-                                self.focus_active_webview();
+                            } else {
+                                let logical_chrome_height = CHROME_HEIGHT;
+                                let logical_my = self.cursor_pos.y as f32 / self.scale_factor as f32;
+                                let page_click = logical_my >= logical_chrome_height;
+                                {
+                                    let mut b = self.ui.lock().unwrap();
+                                    if b.url_bar_focused {
+                                        b.blur_url_bar();
+                                    }
+                                }
+                                if page_click {
+                                    self.focus_active_webview();
+                                }
                             }
                             self.request_redraw();
                         }
@@ -355,6 +436,10 @@ impl ApplicationHandler for BrowserApp {
                         PhysicalKey::Code(KeyCode::KeyR) if primary => {
                             drop(browser);
                             self.reload_active();
+                        }
+                        PhysicalKey::Code(KeyCode::KeyN) if primary && is_shift => {
+                            drop(browser);
+                            self.create_incognito_tab();
                         }
                         PhysicalKey::Code(KeyCode::KeyT) if primary => {
                             drop(browser);
@@ -490,6 +575,10 @@ impl ApplicationHandler for BrowserApp {
                     }
                 }
             }
+            WindowEvent::ScaleFactorChanged { scale_factor, .. } => {
+                self.scale_factor = scale_factor;
+                self.request_redraw();
+            }
             _ => {}
         }
     }
@@ -511,12 +600,13 @@ impl ApplicationHandler for BrowserApp {
 }
 
 impl BrowserApp {
-    fn webview_bounds_for(width: u32, height: u32) -> WryRect {
+    fn webview_bounds_for(physical_width: u32, physical_height: u32, scale: f64) -> WryRect {
+        let logical_chrome = CHROME_HEIGHT as f64;
         WryRect {
-            position: WryLogicalPosition::new(0.0, CHROME_HEIGHT as f64).into(),
+            position: WryLogicalPosition::new(0.0, logical_chrome).into(),
             size: WryLogicalSize::new(
-                width.max(1) as f64,
-                (height as f32 - CHROME_HEIGHT).max(1.0) as f64,
+                (physical_width as f64 / scale).max(1.0),
+                ((physical_height as f64 / scale) - logical_chrome).max(1.0),
             )
             .into(),
         }
@@ -528,7 +618,7 @@ impl BrowserApp {
             .as_ref()
             .map(|window| window.inner_size())
             .unwrap_or_else(|| winit::dpi::PhysicalSize::new(1024, 768));
-        Self::webview_bounds_for(size.width, size.height)
+        Self::webview_bounds_for(size.width, size.height, self.scale_factor)
     }
 
     fn sync_webviews(&mut self) {
@@ -693,6 +783,16 @@ impl BrowserApp {
         self.request_redraw();
     }
 
+    fn create_incognito_tab(&mut self) {
+        {
+            let mut browser = self.ui.lock().unwrap();
+            browser.new_incognito_tab("about:welcome");
+            browser.persist_session();
+        }
+        self.sync_webviews();
+        self.request_redraw();
+    }
+
     fn close_tab(&mut self, tab_id: u32) {
         self.webviews.remove(&tab_id);
         {
@@ -716,6 +816,15 @@ impl BrowserApp {
         if let Some(id) = next_id {
             let mut browser = self.ui.lock().unwrap();
             browser.switch_to_tab_id(id);
+            drop(browser);
+            self.sync_webviews();
+            self.request_redraw();
+        }
+    }
+
+    fn switch_to_tab_by_id(&mut self, tab_id: u32) {
+        let mut browser = self.ui.lock().unwrap();
+        if browser.switch_to_tab_id(tab_id) {
             drop(browser);
             self.sync_webviews();
             self.request_redraw();
@@ -976,13 +1085,16 @@ impl BrowserApp {
         };
         pixmap.fill(page_background.to_tiny_skia());
 
+        let scale = self.scale_factor as f32;
+        let logical_width = width as f32 / scale;
+
         // Page area background
-        let page_area_top = CHROME_HEIGHT;
-        let page_area_h = (height as f32 - page_area_top).max(0.0);
+        let page_area_top = (CHROME_HEIGHT * scale) as u32;
+        let page_area_h = (height as f32 - page_area_top as f32).max(0.0);
         crate::render::fill_solid_rect(
             pixmap,
             0.0,
-            page_area_top,
+            page_area_top as f32,
             width as f32,
             page_area_h,
             page_background,
@@ -993,15 +1105,24 @@ impl BrowserApp {
                 pixmap,
                 &page_pixmap,
                 0,
-                CHROME_HEIGHT as u32,
-                scroll_offset,
-                max_scroll,
+                (CHROME_HEIGHT * scale) as u32,
+                scroll_offset * scale,
+                max_scroll * scale,
             );
-            draw_scrollbar(pixmap, width, height, scroll_offset, max_scroll);
+            draw_scrollbar(pixmap, width, height, scroll_offset * scale, max_scroll * scale, scale);
         } else {
-            draw_empty_page(pixmap, width, height, page_background);
+            draw_empty_page(pixmap, width, height, page_background, scale);
         }
-        draw_chrome_shell(pixmap, width, &chrome);
+        draw_chrome_shell(
+            pixmap,
+            width,
+            &chrome,
+            self.hovered_tab_index,
+            self.hovered_toolbar_btn,
+            &self.hovered_link_url,
+            scale,
+            logical_width,
+        );
 
         // softbuffer: draw to screen
         if let Some(ref mut surface) = self.surface {
@@ -1045,6 +1166,25 @@ impl ChromeSnapshot {
         let can_forward = active_tab
             .map(|tab| tab.history_pos + 1 < tab.history.len())
             .unwrap_or(false);
+        let incognito = active_tab.map(|tab| tab.incognito).unwrap_or(false);
+
+        let user_profile = browser.user_profile();
+        let user_display_name = user_profile.display_name.clone();
+        let user_avatar_color = user_profile.avatar_color;
+
+        let tabs = browser
+            .tabs
+            .iter()
+            .map(|tab| TabInfo {
+                title: if tab.title.trim().is_empty() {
+                    "Yeni Sekme".to_string()
+                } else {
+                    tab.title.clone()
+                },
+                loading: tab.loading,
+                incognito: tab.incognito,
+            })
+            .collect();
 
         Self {
             title,
@@ -1064,6 +1204,11 @@ impl ChromeSnapshot {
                 .map(|tab| tab.zoom_percent)
                 .unwrap_or(DEFAULT_ZOOM_PERCENT),
             bookmarked: browser.is_active_bookmarked(),
+            tabs,
+            active_tab_index: browser.active_tab,
+            incognito,
+            user_display_name,
+            user_avatar_color,
         }
     }
 }
@@ -1211,66 +1356,6 @@ fn password_autofill_script(username: &str, password: &str) -> String {
     )
 }
 
-/// Hit test for chrome UI elements
-fn hit_test(mx: f32, my: f32, width: f32) -> Option<ChromeHit> {
-    let toolbar_y = TAB_STRIP_HEIGHT;
-
-    // Back button: x=12..42, y=toolbar_y+10..toolbar_y+40
-    if mx >= 12.0 && mx < 42.0 && my >= toolbar_y + 10.0 && my < toolbar_y + 40.0 {
-        return Some(ChromeHit::Back);
-    }
-    // Forward: x=48..78
-    if mx >= 48.0 && mx < 78.0 && my >= toolbar_y + 10.0 && my < toolbar_y + 40.0 {
-        return Some(ChromeHit::Forward);
-    }
-    // Refresh: x=84..114
-    if mx >= 84.0 && mx < 114.0 && my >= toolbar_y + 10.0 && my < toolbar_y + 40.0 {
-        return Some(ChromeHit::Refresh);
-    }
-
-    // URL bar: x=128..width-104, y=toolbar_y+8..toolbar_y+44
-    let url_x = 128.0;
-    let url_right = (width - 104.0).max(url_x + 100.0);
-    // Bookmark star at the right side of URL bar
-    if mx >= url_right - 42.0
-        && mx < url_right - 10.0
-        && my >= toolbar_y + 10.0
-        && my < toolbar_y + 42.0
-    {
-        return Some(ChromeHit::Bookmark);
-    }
-    if mx >= url_x && mx < url_right && my >= toolbar_y + 8.0 && my < toolbar_y + 44.0 {
-        return Some(ChromeHit::UrlBar);
-    }
-
-    // Profile: x=width-78..width-50
-    if mx >= width - 78.0 && mx < width - 50.0 && my >= toolbar_y + 12.0 && my < toolbar_y + 40.0 {
-        return Some(ChromeHit::Profile);
-    }
-    // Menu: x=width-42..width-12
-    if mx >= width - 42.0 && mx < width - 12.0 && my >= toolbar_y + 10.0 && my < toolbar_y + 40.0 {
-        return Some(ChromeHit::Menu);
-    }
-
-    // New tab (+) button in tab strip: x after tab, width=28
-    let tab_x = 12.0;
-    let tab_w = (width * 0.34)
-        .clamp(170.0, 260.0)
-        .min((width - 86.0).max(120.0));
-    let plus_x = (tab_x + tab_w + 14.0).min(width - 44.0);
-    if mx >= plus_x && mx < plus_x + 28.0 && my >= 9.0 && my < 37.0 {
-        return Some(ChromeHit::NewTab);
-    }
-
-    // Close tab (x) button on the tab
-    let close_x = tab_x + tab_w - 25.0;
-    if mx >= close_x && mx < close_x + 16.0 && my >= 12.0 && my < 34.0 {
-        return Some(ChromeHit::CloseTab);
-    }
-
-    None
-}
-
 fn blit_scrolled(
     dest: &mut Pixmap,
     src: &Pixmap,
@@ -1323,187 +1408,267 @@ fn blit_scrolled(
     }
 }
 
-fn draw_empty_page(pixmap: &mut Pixmap, width: u32, height: u32, background: Color) {
-    crate::render::fill_solid_rect(
-        pixmap,
-        0.0,
-        CHROME_HEIGHT,
-        width as f32,
-        (height as f32 - CHROME_HEIGHT).max(0.0),
-        background,
-    );
-}
-
-fn draw_chrome_shell(pixmap: &mut Pixmap, width: u32, chrome: &ChromeSnapshot) {
+fn draw_chrome_shell(
+    pixmap: &mut Pixmap,
+    width: u32,
+    chrome: &ChromeSnapshot,
+    hovered_tab_index: Option<usize>,
+    hovered_toolbar_btn: Option<ChromeHit>,
+    hovered_link_url: &Option<String>,
+    scale: f32,
+    logical_width: f32,
+) {
     let width = width as f32;
-    draw_tab_strip(pixmap, width, chrome);
-    draw_toolbar(pixmap, width, chrome);
+    draw_tab_strip(pixmap, width, chrome, hovered_tab_index, scale, logical_width);
+    draw_toolbar(pixmap, width, chrome, hovered_toolbar_btn, scale, logical_width);
     crate::render::fill_solid_rect(
         pixmap,
         0.0,
-        CHROME_HEIGHT - 1.0,
+        (CHROME_HEIGHT - 1.0) * scale,
         width,
-        1.0,
+        1.0 * scale,
         Color::new(218, 220, 224, 255),
     );
+
+    // Show hovered link URL at bottom
+    if let Some(link_url) = hovered_link_url {
+        if !link_url.is_empty() {
+            let label = fit_text(link_url, logical_width - 28.0, 10.0);
+            crate::render::draw_ui_text(
+                pixmap,
+                &label,
+                14.0 * scale,
+                (CHROME_HEIGHT - 14.0) * scale,
+                width - 28.0 * scale,
+                10.0 * scale,
+                Color::new(95, 99, 104, 255),
+                TextAlign::Left,
+            );
+        }
+    }
 }
 
-fn draw_tab_strip(pixmap: &mut Pixmap, width: f32, chrome: &ChromeSnapshot) {
+fn draw_tab_strip(
+    pixmap: &mut Pixmap,
+    width: f32,
+    chrome: &ChromeSnapshot,
+    hovered_tab_index: Option<usize>,
+    scale: f32,
+    logical_width: f32,
+) {
     // Tab strip background - darker top bar like Chrome
     crate::render::fill_solid_rect(
         pixmap,
         0.0,
         0.0,
         width,
-        TAB_STRIP_HEIGHT,
+        TAB_STRIP_HEIGHT * scale,
         Color::new(222, 225, 230, 255),
     );
 
-    let tab_x = 12.0;
-    let tab_y = 6.0;
-    let tab_w = (width * 0.34)
-        .clamp(170.0, 260.0)
-        .min((width - 86.0).max(120.0));
-    let tab_h = 34.0;
+    let tab_x_start = 12.0 * scale;
+    let tab_y = 6.0 * scale;
+    let tab_h = 34.0 * scale;
+    let tab_gap = 2.0 * scale;
+    let max_tab_w = (logical_width * 0.25)
+        .clamp(120.0, 220.0)
+        .min((logical_width - 86.0).max(80.0)) * scale;
 
-    // Active tab - white with rounded top corners
-    fill_rounded_rect_top(
-        pixmap,
-        tab_x,
-        tab_y,
-        tab_w,
-        tab_h,
-        10.0,
-        Color::new(255, 255, 255, 255),
-    );
+    let mut current_x = tab_x_start;
+    let max_x = width - 56.0 * scale;
 
-    // Tab favicon (colored circle)
-    fill_rounded_rect(
-        pixmap,
-        tab_x + 12.0,
-        tab_y + 10.0,
-        14.0,
-        14.0,
-        7.0,
-        Color::new(66, 133, 244, 255),
-    );
-    // Inner dot
-    fill_rounded_rect(
-        pixmap,
-        tab_x + 17.0,
-        tab_y + 14.0,
-        4.0,
-        4.0,
-        2.0,
-        Color::new(255, 255, 255, 255),
-    );
+    for (idx, tab_info) in chrome.tabs.iter().enumerate() {
+        if current_x + max_tab_w > max_x && idx != chrome.active_tab_index {
+            continue;
+        }
 
-    // Tab title
-    let tab_title = fit_text(&chrome.title, tab_w - 72.0, 13.0);
-    crate::render::draw_ui_text(
-        pixmap,
-        &tab_title,
-        tab_x + 34.0,
-        tab_y + 10.0,
-        tab_w - 72.0,
-        13.0,
-        Color::new(32, 33, 36, 255),
-        TextAlign::Left,
-    );
+        let tab_w = max_tab_w.min(max_x - current_x).max(60.0 * scale);
+        let is_active = idx == chrome.active_tab_index;
+        let is_hovered = hovered_tab_index == Some(idx);
 
-    // Close tab button
-    let close_x = tab_x + tab_w - 24.0;
-    let is_hover_close = false; // TODO: track hover state
-    let close_bg = if is_hover_close {
-        Color::new(220, 220, 220, 255)
-    } else {
-        Color::new(255, 255, 255, 255)
-    };
-    fill_rounded_rect(pixmap, close_x, tab_y + 8.0, 18.0, 18.0, 9.0, close_bg);
-    crate::render::draw_ui_text(
-        pixmap,
-        "\u{2715}", // ✕
-        close_x,
-        tab_y + 9.0,
-        18.0,
-        11.0,
-        Color::new(95, 99, 104, 255),
-        TextAlign::Center,
-    );
+        // Tab background
+        let tab_bg = if is_active {
+            Color::new(255, 255, 255, 255)
+        } else if is_hovered {
+            Color::new(238, 240, 244, 255)
+        } else {
+            Color::new(215, 218, 224, 255)
+        };
+
+        if is_active {
+            fill_rounded_rect_top(pixmap, current_x, tab_y, tab_w, tab_h, 10.0 * scale, tab_bg);
+        } else {
+            fill_rounded_rect(pixmap, current_x, tab_y + 4.0 * scale, tab_w, tab_h - 4.0 * scale, 8.0 * scale, tab_bg);
+        }
+
+        // Tab favicon (colored circle)
+        let favicon_color = if tab_info.incognito {
+            Color::new(128, 128, 128, 255)
+        } else if tab_info.loading {
+            Color::new(251, 188, 4, 255)
+        } else {
+            Color::new(66, 133, 244, 255)
+        };
+        fill_rounded_rect(
+            pixmap,
+            current_x + 10.0 * scale,
+            tab_y + 10.0 * scale,
+            14.0 * scale,
+            14.0 * scale,
+            7.0 * scale,
+            favicon_color,
+        );
+
+        // Loading spinner indicator
+        if tab_info.loading {
+            fill_rounded_rect(
+                pixmap,
+                current_x + 14.0 * scale,
+                tab_y + 14.0 * scale,
+                6.0 * scale,
+                6.0 * scale,
+                3.0 * scale,
+                Color::new(255, 255, 255, 255),
+            );
+        }
+
+        // Tab title
+        let title_max_w = tab_w - 52.0 * scale;
+        let tab_title = fit_text(&tab_info.title, title_max_w, 12.0);
+        let title_color = if is_active {
+            Color::new(32, 33, 36, 255)
+        } else {
+            Color::new(95, 99, 104, 255)
+        };
+        crate::render::draw_ui_text(
+            pixmap,
+            &tab_title,
+            current_x + 28.0 * scale,
+            tab_y + 10.0 * scale,
+            title_max_w,
+            12.0 * scale,
+            title_color,
+            TextAlign::Left,
+        );
+
+        // Close tab button
+        let close_x = current_x + tab_w - 22.0 * scale;
+        let close_y = tab_y + 8.0 * scale;
+        let is_close_hovered = false;
+        let close_bg = if is_close_hovered {
+            Color::new(220, 220, 220, 255)
+        } else if is_active {
+            Color::new(240, 240, 240, 255)
+        } else {
+            Color::new(215, 218, 224, 255)
+        };
+        fill_rounded_rect(pixmap, close_x, close_y, 16.0 * scale, 16.0 * scale, 8.0 * scale, close_bg);
+        icons::draw_icon(
+            pixmap,
+            "close",
+            close_x + 4.0 * scale,
+            close_y + 4.0 * scale,
+            8.0 * scale,
+            Color::new(95, 99, 104, 255),
+        );
+
+        current_x += tab_w + tab_gap;
+    }
 
     // New tab button (+)
-    let plus_x = (tab_x + tab_w + 14.0).min(width - 44.0);
+    let plus_x = current_x.min(width - 44.0 * scale);
     let plus_hover = false;
     let plus_bg = if plus_hover {
         Color::new(210, 213, 218, 255)
     } else {
         Color::new(232, 234, 237, 255)
     };
-    fill_rounded_rect(pixmap, plus_x, 9.0, 28.0, 28.0, 14.0, plus_bg);
-    crate::render::draw_ui_text(
+    fill_rounded_rect(pixmap, plus_x, 9.0 * scale, 28.0 * scale, 28.0 * scale, 14.0 * scale, plus_bg);
+    icons::draw_icon(
         pixmap,
-        "+",
-        plus_x,
-        10.0,
-        28.0,
-        18.0,
+        "plus",
+        plus_x + 6.0 * scale,
+        9.0 * scale,
+        16.0 * scale,
         Color::new(60, 64, 67, 255),
-        TextAlign::Center,
     );
 
-    // Tab count badge
-    if chrome.tab_count > 1 {
-        let badge = format!("{}", chrome.tab_count);
-        crate::render::draw_ui_text(
+    // Incognito indicator
+    if chrome.incognito {
+        icons::draw_icon(
             pixmap,
-            &badge,
-            plus_x + 34.0,
-            14.0,
-            28.0,
-            11.0,
-            Color::new(95, 99, 104, 255),
-            TextAlign::Left,
+            "incognito",
+            width - 100.0 * scale,
+            12.0 * scale,
+            18.0 * scale,
+            Color::new(128, 128, 128, 255),
         );
     }
 }
 
-fn draw_toolbar(pixmap: &mut Pixmap, width: f32, chrome: &ChromeSnapshot) {
-    let y = TAB_STRIP_HEIGHT;
+fn draw_toolbar(
+    pixmap: &mut Pixmap,
+    width: f32,
+    chrome: &ChromeSnapshot,
+    hovered_toolbar_btn: Option<ChromeHit>,
+    scale: f32,
+    logical_width: f32,
+) {
+    let y = TAB_STRIP_HEIGHT * scale;
     crate::render::fill_solid_rect(
         pixmap,
         0.0,
         y,
         width,
-        TOOLBAR_HEIGHT,
+        TOOLBAR_HEIGHT * scale,
         Color::new(255, 255, 255, 255),
     );
 
-    let btn_y = y + 10.0;
+    let btn_y = y + 10.0 * scale;
 
-    // Back button ←
-    draw_nav_button(pixmap, 12.0, btn_y, "\u{2190}", chrome.can_back);
-    // Forward button →
-    draw_nav_button(pixmap, 48.0, btn_y, "\u{2192}", chrome.can_forward);
-    // Refresh button ↻
+    // Back button
+    let back_hover = hovered_toolbar_btn == Some(ChromeHit::Back);
+    draw_nav_button(pixmap, 12.0 * scale, btn_y, "back", chrome.can_back, back_hover, scale);
+    // Forward button
+    let fwd_hover = hovered_toolbar_btn == Some(ChromeHit::Forward);
+    draw_nav_button(pixmap, 48.0 * scale, btn_y, "forward", chrome.can_forward, fwd_hover, scale);
+    // Refresh button
+    let refresh_hover = hovered_toolbar_btn == Some(ChromeHit::Refresh);
     draw_nav_button(
         pixmap,
-        84.0,
+        84.0 * scale,
         btn_y,
-        if chrome.loading {
-            "\u{2715}"
-        } else {
-            "\u{21BB}"
-        },
+        if chrome.loading { "close" } else { "refresh" },
         true,
+        refresh_hover,
+        scale,
     );
 
     // URL bar
-    let address_x = 128.0;
-    let address_w = (width - address_x - 104.0).max(140.0);
+    let address_x = 128.0 * scale;
+    let address_w = (logical_width - 128.0 - 104.0).max(140.0) * scale;
 
     // URL bar background
-    let url_bg = Color::new(241, 243, 244, 255);
-    fill_rounded_rect(pixmap, address_x, y + 8.0, address_w, 36.0, 20.0, url_bg);
+    let url_bg = if chrome.url_bar_focused {
+        Color::new(255, 255, 255, 255)
+    } else {
+        Color::new(241, 243, 244, 255)
+    };
+    fill_rounded_rect(pixmap, address_x, y + 8.0 * scale, address_w, 36.0 * scale, 20.0 * scale, url_bg);
+
+    // Focus border
+    if chrome.url_bar_focused {
+        draw_rounded_rect_border(
+            pixmap,
+            address_x,
+            y + 8.0 * scale,
+            address_w,
+            36.0 * scale,
+            20.0 * scale,
+            Color::new(66, 133, 244, 255),
+            1.5 * scale,
+        );
+    }
 
     // Lock/security icon
     let is_https = chrome.url.starts_with("https://");
@@ -1512,16 +1677,14 @@ fn draw_toolbar(pixmap: &mut Pixmap, width: f32, chrome: &ChromeSnapshot) {
     } else {
         Color::new(128, 134, 139, 255)
     };
-    let lock_icon = if is_https { "\u{1F512}" } else { "\u{2139}" };
-    crate::render::draw_ui_text(
+    let lock_icon_name = if is_https { "lock" } else { "search" };
+    icons::draw_icon(
         pixmap,
-        lock_icon,
-        address_x + 10.0,
-        y + 16.0,
-        16.0,
-        14.0,
+        lock_icon_name,
+        address_x + 10.0 * scale,
+        y + 15.0 * scale,
+        16.0 * scale,
         lock_color,
-        TextAlign::Center,
     );
 
     // URL text - show typed text when focused, URL when not
@@ -1537,14 +1700,14 @@ fn draw_toolbar(pixmap: &mut Pixmap, width: f32, chrome: &ChromeSnapshot) {
     } else {
         Color::new(60, 64, 67, 255)
     };
-    let url_text = fit_text(url_display, address_w - 80.0, 13.0);
+    let url_text = fit_text(url_display, address_w - 80.0 * scale, 13.0);
     crate::render::draw_ui_text(
         pixmap,
         &url_text,
-        address_x + 32.0,
-        y + 18.0,
-        address_w - 78.0,
-        13.0,
+        address_x + 32.0 * scale,
+        y + 18.0 * scale,
+        address_w - 78.0 * scale,
+        13.0 * scale,
         url_color,
         TextAlign::Left,
     );
@@ -1553,75 +1716,79 @@ fn draw_toolbar(pixmap: &mut Pixmap, width: f32, chrome: &ChromeSnapshot) {
     if chrome.url_bar_focused {
         crate::render::fill_solid_rect(
             pixmap,
-            address_x + 32.0 + (url_text.chars().count() as f32 * 7.0).min(address_w - 80.0),
-            y + 18.0,
-            1.5,
-            14.0,
+            address_x + 32.0 * scale + (url_text.chars().count() as f32 * 7.0 * scale).min(address_w - 80.0 * scale),
+            y + 18.0 * scale,
+            1.5 * scale,
+            14.0 * scale,
             Color::new(32, 33, 36, 255),
         );
     }
 
     // Star/bookmark button
-    crate::render::draw_ui_text(
+    let star_hover = hovered_toolbar_btn == Some(ChromeHit::Bookmark);
+    let star_color = if chrome.bookmarked {
+        Color::new(251, 188, 4, 255)
+    } else if star_hover {
+        Color::new(180, 180, 180, 255)
+    } else {
+        Color::new(95, 99, 104, 255)
+    };
+    icons::draw_icon(
         pixmap,
-        if chrome.bookmarked {
-            "\u{2605}"
-        } else {
-            "\u{2606}"
-        },
-        address_x + address_w - 34.0,
-        y + 17.0,
-        24.0,
-        15.0,
-        if chrome.bookmarked {
-            Color::new(251, 188, 4, 255)
-        } else {
-            Color::new(95, 99, 104, 255)
-        },
-        TextAlign::Center,
+        if chrome.bookmarked { "star" } else { "star_outline" },
+        address_x + address_w - 34.0 * scale,
+        y + 15.0 * scale,
+        20.0 * scale,
+        star_color,
     );
 
     // Profile button
-    let prof_x = width - 78.0;
-    fill_rounded_rect(
-        pixmap,
-        prof_x,
-        y + 12.0,
-        28.0,
-        28.0,
-        14.0,
-        Color::new(232, 240, 254, 255),
-    );
+    let prof_x = width - 78.0 * scale;
+    let prof_hover = hovered_toolbar_btn == Some(ChromeHit::Profile);
+    let avatar_r = ((chrome.user_avatar_color >> 16) & 0xFF) as u8;
+    let avatar_g = ((chrome.user_avatar_color >> 8) & 0xFF) as u8;
+    let avatar_b = (chrome.user_avatar_color & 0xFF) as u8;
+    let prof_bg = if prof_hover {
+        Color::new(avatar_r.saturating_sub(20), avatar_g.saturating_sub(20), avatar_b.saturating_sub(20), 255)
+    } else {
+        Color::new(avatar_r, avatar_g, avatar_b, 255)
+    };
+    fill_rounded_rect(pixmap, prof_x, y + 12.0 * scale, 28.0 * scale, 28.0 * scale, 14.0 * scale, prof_bg);
+    // Show first letter of display name as avatar
+    let initial = chrome.user_display_name.chars().next().unwrap_or('U').to_uppercase().to_string();
     crate::render::draw_ui_text(
         pixmap,
-        "\u{1F464}",
+        &initial,
         prof_x,
-        y + 15.0,
-        28.0,
-        13.0,
-        Color::new(26, 115, 232, 255),
+        y + 15.0 * scale,
+        28.0 * scale,
+        14.0 * scale,
+        Color::new(255, 255, 255, 255),
         TextAlign::Center,
     );
 
-    // Menu button ⋮
-    draw_nav_button(pixmap, width - 42.0, btn_y, "\u{22EE}", true);
+    // Menu button
+    let menu_hover = hovered_toolbar_btn == Some(ChromeHit::Menu);
+    draw_nav_button(pixmap, width - 42.0 * scale, btn_y, "menu", true, menu_hover, scale);
 
-    // Status bar text
-    let status = if chrome.loading {
-        "Yükleniyor..."
+    // Status bar / link hover display
+    let status_display = if chrome.loading {
+        "Yükleniyor...".to_string()
+    } else if !chrome.status.trim().is_empty() {
+        chrome.status.clone()
     } else {
-        chrome.status.as_str()
+        String::new()
     };
-    if !status.trim().is_empty() {
-        let status_with_zoom = format!("{} · {}%", status, chrome.zoom_percent);
-        let label = fit_text(&status_with_zoom, width - 28.0, 10.0);
+    if !status_display.trim().is_empty() {
+        let status_with_zoom = format!("{} · {}%", status_display, chrome.zoom_percent);
+        let label = fit_text(&status_with_zoom, logical_width - 28.0, 10.0);
         crate::render::draw_ui_text(
             pixmap,
             &label,
-            14.0,
-            CHROME_HEIGHT - 14.0,
-            width - 28.0,
-            10.0,
+            14.0 * scale,
+            (CHROME_HEIGHT - 14.0) * scale,
+            width - 28.0 * scale,
+            10.0 * scale,
             Color::new(128, 134, 139, 255),
             TextAlign::Left,
         );
@@ -1634,14 +1801,15 @@ fn draw_scrollbar(
     height: u32,
     scroll_offset: f32,
     max_scroll: f32,
+    scale: f32,
 ) {
-    let page_height = height.saturating_sub(CHROME_HEIGHT as u32) as f32;
+    let page_height = (height as f32 - (CHROME_HEIGHT * scale)) as f32;
     if page_height <= 0.0 || max_scroll <= 0.0 {
         return;
     }
 
-    let sb_x = width as f32 - SCROLLBAR_WIDTH - 2.0;
-    let sb_y = CHROME_HEIGHT;
+    let sb_x = width as f32 - (SCROLLBAR_WIDTH + 2.0) * scale;
+    let sb_y = CHROME_HEIGHT * scale;
     let sb_h = page_height;
 
     // Track background
@@ -1649,37 +1817,52 @@ fn draw_scrollbar(
         pixmap,
         sb_x,
         sb_y,
-        SCROLLBAR_WIDTH,
+        SCROLLBAR_WIDTH * scale,
         sb_h,
         Color::new(241, 243, 244, 255),
     );
 
     // Thumb
     let total_height = page_height + max_scroll;
-    let thumb_h = (page_height / total_height * sb_h).max(20.0).min(sb_h);
+    let thumb_h = (page_height / total_height * sb_h).max(20.0 * scale).min(sb_h);
     let thumb_y = sb_y + (scroll_offset / max_scroll) * (sb_h - thumb_h);
 
     fill_rounded_rect(
         pixmap,
-        sb_x + 1.0,
+        sb_x + 1.0 * scale,
         thumb_y,
-        SCROLLBAR_WIDTH - 2.0,
+        (SCROLLBAR_WIDTH - 2.0) * scale,
         thumb_h,
-        3.0,
+        3.0 * scale,
         Color::new(188, 192, 196, 255),
     );
 }
 
-fn draw_nav_button(pixmap: &mut Pixmap, x: f32, y: f32, label: &str, enabled: bool) {
-    let bg = Color::new(255, 255, 255, 255);
+fn draw_empty_page(pixmap: &mut Pixmap, width: u32, height: u32, background: Color, scale: f32) {
+    crate::render::fill_solid_rect(
+        pixmap,
+        0.0,
+        CHROME_HEIGHT * scale,
+        width as f32,
+        (height as f32 - CHROME_HEIGHT * scale).max(0.0),
+        background,
+    );
+}
+
+fn draw_nav_button(pixmap: &mut Pixmap, x: f32, y: f32, icon: &str, enabled: bool, hover: bool, scale: f32) {
+    let bg = if hover {
+        Color::new(241, 243, 244, 255)
+    } else {
+        Color::new(255, 255, 255, 255)
+    };
     let fg = if enabled {
         Color::new(60, 64, 67, 255)
     } else {
         Color::new(200, 204, 208, 255)
     };
 
-    fill_rounded_rect(pixmap, x, y, 30.0, 30.0, 15.0, bg);
-    crate::render::draw_ui_text(pixmap, label, x, y + 4.0, 30.0, 17.0, fg, TextAlign::Center);
+    fill_rounded_rect(pixmap, x, y, 30.0 * scale, 30.0 * scale, 15.0 * scale, bg);
+    icons::draw_icon(pixmap, icon, x + 7.0 * scale, y + 7.0 * scale, 16.0 * scale, fg);
 }
 
 fn fill_rounded_rect(
@@ -1778,6 +1961,177 @@ fn fill_rounded_rect_top(
             None,
         );
     }
+}
+
+fn draw_rounded_rect_border(
+    pixmap: &mut Pixmap,
+    x: f32,
+    y: f32,
+    width: f32,
+    height: f32,
+    radius: f32,
+    color: Color,
+    stroke_width: f32,
+) {
+    if width <= 0.0 || height <= 0.0 {
+        return;
+    }
+
+    let r = radius.min(width / 2.0).min(height / 2.0).max(0.0);
+    let sw = stroke_width;
+
+    // Draw outer rounded rect (border color)
+    let mut paint = Paint::default();
+    paint.set_color_rgba8(
+        (color.r * 255.0) as u8,
+        (color.g * 255.0) as u8,
+        (color.b * 255.0) as u8,
+        (color.a * 255.0) as u8,
+    );
+
+    let mut outer = PathBuilder::new();
+    outer.move_to(x - sw + r, y - sw);
+    outer.line_to(x + width - r + sw, y - sw);
+    outer.quad_to(x + width + sw, y - sw, x + width + sw, y - sw + r);
+    outer.line_to(x + width + sw, y + height - r + sw);
+    outer.quad_to(x + width + sw, y + height + sw, x + width - r + sw, y + height + sw);
+    outer.line_to(x - sw + r, y + height + sw);
+    outer.quad_to(x - sw, y + height + sw, x - sw, y + height - r + sw);
+    outer.line_to(x - sw, y - sw + r);
+    outer.quad_to(x - sw, y - sw, x - sw + r, y - sw);
+    outer.close();
+
+    if let Some(path) = outer.finish() {
+        pixmap.fill_path(&path, &paint, FillRule::Winding, Transform::identity(), None);
+    }
+
+    // Draw inner rounded rect (white to create hollow effect)
+    let mut inner_paint = Paint::default();
+    inner_paint.set_color_rgba8(255, 255, 255, 255);
+
+    let mut inner = PathBuilder::new();
+    inner.move_to(x + r, y);
+    inner.line_to(x + width - r, y);
+    inner.quad_to(x + width, y, x + width, y + r);
+    inner.line_to(x + width, y + height - r);
+    inner.quad_to(x + width, y + height, x + width - r, y + height);
+    inner.line_to(x + r, y + height);
+    inner.quad_to(x, y + height, x, y + height - r);
+    inner.line_to(x, y + r);
+    inner.quad_to(x, y, x + r, y);
+    inner.close();
+
+    if let Some(path) = inner.finish() {
+        pixmap.fill_path(&path, &inner_paint, FillRule::Winding, Transform::identity(), None);
+    }
+}
+
+/// Hit test for tab strip - returns tab index if hovering over a tab
+fn hit_test_tab(mx: f32, my: f32, tab_count: usize, active_tab: usize, logical_width: f32) -> Option<usize> {
+    if my < 6.0 || my > TAB_STRIP_HEIGHT {
+        return None;
+    }
+
+    if tab_count == 0 {
+        return None;
+    }
+
+    let tab_x_start = 12.0;
+    let tab_y = 6.0;
+    let tab_h = 34.0;
+    let tab_gap = 2.0;
+    let max_tab_w = (logical_width * 0.25)
+        .clamp(120.0, 220.0)
+        .min((logical_width - 86.0).max(80.0));
+
+    let mut current_x = tab_x_start;
+    let max_x = logical_width - 56.0;
+
+    for idx in 0..tab_count {
+        if current_x + max_tab_w > max_x && idx != active_tab {
+            continue;
+        }
+
+        let tab_w = max_tab_w.min(max_x - current_x).max(60.0);
+
+        if mx >= current_x && mx < current_x + tab_w && my >= tab_y && my < tab_y + tab_h {
+            return Some(idx);
+        }
+
+        current_x += tab_w + tab_gap;
+    }
+
+    None
+}
+
+/// Hit test for chrome UI elements
+fn hit_test(mx: f32, my: f32, logical_width: f32) -> Option<ChromeHit> {
+    let toolbar_y = TAB_STRIP_HEIGHT;
+
+    // Back button: x=12..42, y=toolbar_y+10..toolbar_y+40
+    if mx >= 12.0 && mx < 42.0 && my >= toolbar_y + 10.0 && my < toolbar_y + 40.0 {
+        return Some(ChromeHit::Back);
+    }
+    // Forward: x=48..78
+    if mx >= 48.0 && mx < 78.0 && my >= toolbar_y + 10.0 && my < toolbar_y + 40.0 {
+        return Some(ChromeHit::Forward);
+    }
+    // Refresh: x=84..114
+    if mx >= 84.0 && mx < 114.0 && my >= toolbar_y + 10.0 && my < toolbar_y + 40.0 {
+        return Some(ChromeHit::Refresh);
+    }
+
+    // URL bar: x=128..width-104, y=toolbar_y+8..toolbar_y+44
+    let url_x = 128.0;
+    let url_right = (logical_width - 104.0).max(url_x + 100.0);
+    // Bookmark star at the right side of URL bar
+    if mx >= url_right - 42.0
+        && mx < url_right - 10.0
+        && my >= toolbar_y + 10.0
+        && my < toolbar_y + 42.0
+    {
+        return Some(ChromeHit::Bookmark);
+    }
+    if mx >= url_x && mx < url_right && my >= toolbar_y + 8.0 && my < toolbar_y + 44.0 {
+        return Some(ChromeHit::UrlBar);
+    }
+
+    // Profile: x=width-78..width-50
+    if mx >= logical_width - 78.0 && mx < logical_width - 50.0 && my >= toolbar_y + 12.0 && my < toolbar_y + 40.0 {
+        return Some(ChromeHit::Profile);
+    }
+    // Menu: x=width-42..width-12
+    if mx >= logical_width - 42.0 && mx < logical_width - 12.0 && my >= toolbar_y + 10.0 && my < toolbar_y + 40.0 {
+        return Some(ChromeHit::Menu);
+    }
+
+    // New tab (+) button in tab strip: x after tab, width=28
+    let tab_x = 12.0;
+    let tab_w = (logical_width * 0.25)
+        .clamp(120.0, 220.0)
+        .min((logical_width - 86.0).max(80.0));
+    let tab_gap = 2.0;
+    let mut current_x = tab_x + tab_w + tab_gap;
+    let max_x = logical_width - 56.0;
+    // Skip to end of tabs
+    for _ in 1..10 {
+        if current_x + tab_w > max_x {
+            break;
+        }
+        current_x += tab_w + tab_gap;
+    }
+    let plus_x = current_x.min(logical_width - 44.0);
+    if mx >= plus_x && mx < plus_x + 28.0 && my >= 9.0 && my < 37.0 {
+        return Some(ChromeHit::NewTab);
+    }
+
+    // Close tab (x) button on the tab
+    let close_x = tab_x + tab_w - 25.0;
+    if mx >= close_x && mx < close_x + 16.0 && my >= 12.0 && my < 34.0 {
+        return Some(ChromeHit::CloseTab);
+    }
+
+    None
 }
 
 fn fit_text(text: &str, max_width: f32, font_size: f32) -> String {

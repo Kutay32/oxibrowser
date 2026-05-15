@@ -6,6 +6,14 @@ Cargo.lock
 .DS_Store
 *.swp
 *.swo
+*.app
+*.dSYM
+*.xcuserdata
+*.xcworkspace/xcuserdata/
+DerivedData/
+Pods/
+Build/
+*.app.dSYM
 
 # IDE
 .idea/

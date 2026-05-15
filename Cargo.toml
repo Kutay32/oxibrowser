@@ -3,6 +3,16 @@ name = "oxibrowser"
 version = "0.1.0"
 edition = "2021"
 description = "Rust shell ve native WebView motoru ile Chrome-benzeri web tarayıcısı - OxiBrowser"
+default-run = "oxibrowser"
+
+[lib]
+name = "oxibrowser_lib"
+path = "src/lib.rs"
+
+[[bin]]
+name = "oxibrowser"
+path = "src/main.rs"
+required-features = ["desktop"]
 
 [dependencies]
 # Window & UI
@@ -46,6 +56,19 @@ unicode-linebreak = "0.1"
 # Logging
 log = "0.4"
 env_logger = "0.11"
+
+# Apple platform dependencies
+[target.'cfg(target_vendor = "apple")'.dependencies]
+objc2 = "0.6"
+objc2-foundation = { version = "0.3", features = ["std"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2-app-kit = { version = "0.3", features = ["std", "NSMenu", "NSMenuItem", "NSApplication", "NSImage", "NSStatusBar", "NSEvent"] }
+
+[features]
+default = ["desktop"]
+desktop = []
+ios-app = []
 
 [profile.release]
 opt-level = 2
